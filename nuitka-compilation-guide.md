@@ -19,28 +19,32 @@ This guide outlines the process to compile a Python `main.py` file using Nuitka,
 
    Run the following command to set up the Visual Studio environment for x64 architecture:
    ```
-   "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64
+   "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" x64
    ```
 
-3. **Navigate to Your Project Directory**
+<!-- 3. **Navigate to Your Project Directory**
 
    Change to your project directory:
    ```
-   cd "path\to\your\project\directory"
-   ```
+   cd "C:\Users\se27925\OneDrive - Stellantis\## Projects\Project_DMTools\Pickaxe"
+   ``` -->
 
 4. **Activate Your Python Virtual Environment**
 
    If you're using a virtual environment, activate it:
    ```
-   .venv\Scripts\activate
+   "C:\Users\se27925\OneDrive - Stellantis\## Projects\Project_DMTools\Pickaxe\.venv\Scripts\activate"
    ```
 
 5. **Run Nuitka Compilation Command**
 
    Execute the following Nuitka command to compile your `main.py`:
+   <!-- ```
+   nuitka --standalone --onefile --follow-imports --assume-yes-for-downloads --include-data-file=settings.ico=settings.ico --include-data-file=vw.ico=vw.ico --remove-output --windows-console-mode=disable --windows-icon-from-ico=pickaxe.ico --onefile-windows-splash-screen-image=pickaxe.png --output-filename=PickAxe.exe --plugin-enable=pyside6  "C:\Users\se27925\OneDrive - Stellantis\## Projects\Project_DMTools\Pickaxe\starter.py"
+   ``` -->
+
    ```
-   nuitka --standalone --onefile --follow-imports --assume-yes-for-downloads --msvc=latest --jobs=6 --remove-output --full-compat --plugin-enable=pyside6 --windows-console-mode=disable --windows-icon-from-ico=pickaxe.ico --windows-icon-from-ico=pickaxe.ico --include-data-file=pickaxe.ico=pickaxe.ico --include-data-file=pickaxe.png=pickaxe.png --onefile-windows-splash-screen-image=pickaxe.png --output-filename=PickAxe.exe starter.py
+   python -m nuitka --onefile --windows-disable-console --enable-plugin=pyside6 --follow-imports --assume-yes-for-downloads --include-data-file=settings.ico=settings.ico --include-data-file=vw.ico=vw.ico --remove-output --windows-console-mode=disable --windows-icon-from-ico=pickaxe.ico --onefile-windows-splash-screen-image=pickaxe.png --output-filename=PickAxe.exe starter.py 
    ```
 
    This command includes the following options:
