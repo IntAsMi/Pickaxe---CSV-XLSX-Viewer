@@ -21,3 +21,6 @@ __pycache__/visual_workshop.cpython-312.pyc
 *.xml
 *.csv
 .__*
+build/*
+p!ckaxe_build.zip
+Output/p!ckaxe_installer.exe
