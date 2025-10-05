@@ -1,7 +1,9 @@
+#data_transformer.py
 import sys
 import os
 import re
 import polars as pl
+import json
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QTableView, QHeaderView, QFileDialog, QRadioButton,
@@ -14,7 +16,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QAbstractTableModel, QDate, QThread, Signal, Slot, QTimer, QUrl, QStringListModel, QSize, QRegularExpression
 from PySide6.QtGui import (
     QPainter, QAction, QIcon, QFont, QColor, QDesktopServices, QPixmap,
-    QSyntaxHighlighter, QTextCharFormat
+    QSyntaxHighlighter, QTextCharFormat, QFontMetrics
 )
 
 from datetime import datetime, date
@@ -32,7 +34,72 @@ except ImportError:
     print("Warning: fuzzywuzzy library not found. Advanced column name matching for concatenation will be limited.")
 import collections
 
-# --- Polars Syntax Highlighter --- ( 그대로 유지 )
+
+class ShiftClickCheckboxListWidget(QListWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.anchor_index = -1  # Stores the index of the last item clicked without Shift
+        self.is_handling_shift_click = False # Re-entrancy guard
+
+    def _get_item_and_index_for_checkbox(self, checkbox_widget):
+        """Helper to find the QListWidgetItem and its row for a given checkbox."""
+        for i in range(self.count()):
+            item = self.item(i)
+            if self.itemWidget(item) == checkbox_widget:
+                return item, i
+        return None, -1
+
+    def handle_checkbox_state_changed(self):
+        """
+        Handles the stateChanged signal from individual QCheckBoxes.
+        Implements Shift-click range selection logic.
+        """
+        if self.is_handling_shift_click: # Avoid recursion during programmatic changes
+            return
+
+        checkbox = self.sender()
+        if not isinstance(checkbox, QCheckBox):
+            return
+
+        current_item, current_index = self._get_item_and_index_for_checkbox(checkbox)
+        if not current_item:
+            return # Should not happen if setup correctly
+
+        modifiers = QApplication.keyboardModifiers()
+        target_state = checkbox.isChecked() # The new state of the clicked checkbox
+
+        if Qt.ShiftModifier & modifiers and self.anchor_index != -1 and self.anchor_index != current_index:
+            # Shift key is pressed, and a valid anchor exists, and it's not the same item
+            self.is_handling_shift_click = True # Set re-entrancy guard
+
+            start_loop_index = min(self.anchor_index, current_index)
+            end_loop_index = max(self.anchor_index, current_index)
+
+            for i in range(start_loop_index, end_loop_index + 1):
+                # The current_index checkbox is already handled by the user's direct click
+                # We only need to programmatically change the others in the range.
+                if i == current_index:
+                    continue
+
+                item_in_range = self.item(i)
+                checkbox_in_range = self.itemWidget(item_in_range)
+
+                if isinstance(checkbox_in_range, QCheckBox):
+                    if checkbox_in_range.isChecked() != target_state:
+                        # This setChecked will trigger stateChanged again,
+                        # but is_handling_shift_click guard will prevent recursion of this logic.
+                        # External slots connected to stateChanged (like diagram updates) will still fire.
+                        checkbox_in_range.setChecked(target_state)
+
+            self.is_handling_shift_click = False # Release guard
+            # After a shift-click, the anchor_index typically does NOT change.
+            # It remains the item that was last clicked WITHOUT shift.
+        else:
+            # No Shift, or no anchor, or clicking the anchor item itself.
+            # This click establishes a new anchor.
+            self.anchor_index = current_index
+
+# --- Polars Syntax Highlighter ---
 class PolarsSyntaxHighlighter(QSyntaxHighlighter):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -56,15 +123,15 @@ class PolarsSyntaxHighlighter(QSyntaxHighlighter):
         # 2. Expression methods (e.g., .alias(), .cast())
         method_format = QTextCharFormat()
         method_format.setForeground(QColor("#8A2BE2")) # BlueViolet
-        method_pattern = QRegularExpression("\\.([a-zA-Z_][a-zA-Z0-9_]*)\\b(?=\\s*\\()") 
+        method_pattern = QRegularExpression("\\.([a-zA-Z_][a-zA-Z0-9_]*)\\b(?=\\s*\\()")
         self.highlighting_rules.append({"pattern": method_pattern, "format": method_format, "capture_group": 1})
 
 
         # 3. Keywords (True, False, None, and common operators as words)
         keyword_format = QTextCharFormat()
-        keyword_format.setForeground(QColor("darkblue")) 
+        keyword_format.setForeground(QColor("darkblue"))
         keyword_format.setFontWeight(QFont.Bold)
-        keywords = ["True", "False", "None", "and", "or", "not", "in", "is", "as", "if", "else", "then", "otherwise"] 
+        keywords = ["True", "False", "None", "and", "or", "not", "in", "is", "as", "if", "else", "then", "otherwise"]
         for word in keywords:
             pattern = QRegularExpression(f"\\b{word}\\b")
             self.highlighting_rules.append({"pattern": pattern, "format": keyword_format})
@@ -87,10 +154,10 @@ class PolarsSyntaxHighlighter(QSyntaxHighlighter):
         # 5. Operators
         operator_format = QTextCharFormat()
         operator_format.setForeground(QColor("#B22222")) # Firebrick
-        operator_format.setFontWeight(QFont.Normal) 
-        operators = ["=", "==", "!=", "<", "<=", ">", ">=", "\\+", "-", "\\*", "/", "%", "&", "\\|", "~", "\\^", "\\*\\*"] 
+        operator_format.setFontWeight(QFont.Normal)
+        operators = ["=", "==", "!=", "<", "<=", ">", ">=", "\\+", "-", "\\*", "/", "%", "&", "\\|", "~", "\\^", "\\*\\*"]
         for op in operators:
-            pattern = QRegularExpression(re.escape(op) if len(op)==1 and op not in ['&','|','~','^'] else op) 
+            pattern = QRegularExpression(re.escape(op) if len(op)==1 and op not in ['&','|','~','^'] else op)
             self.highlighting_rules.append({"pattern": pattern, "format": operator_format})
 
         # 6. Strings (single and double quoted)
@@ -113,10 +180,10 @@ class PolarsSyntaxHighlighter(QSyntaxHighlighter):
         comment_format.setForeground(QColor("gray"))
         comment_format.setFontItalic(True)
         self.highlighting_rules.append({"pattern": QRegularExpression("#[^\n]*"), "format": comment_format})
-        
+
         # 9. Parentheses, Brackets, Braces
         punctuation_format = QTextCharFormat()
-        punctuation_format.setForeground(QColor("darkGray")) 
+        punctuation_format.setForeground(QColor("darkGray"))
         punctuation_format.setFontWeight(QFont.Bold)
         for punc in ["\\(", "\\)", "\\[", "\\]", "\\{", "\\}"]: # Escaped for regex
             pattern = QRegularExpression(punc)
@@ -129,9 +196,9 @@ class PolarsSyntaxHighlighter(QSyntaxHighlighter):
             iterator = regex.globalMatch(text)
             while iterator.hasNext():
                 match = iterator.next()
-                start_index = match.capturedStart(rule.get("capture_group", 0)) 
+                start_index = match.capturedStart(rule.get("capture_group", 0))
                 length = match.capturedLength(rule.get("capture_group", 0))
-                if start_index != -1 and length > 0: 
+                if start_index != -1 and length > 0:
                     self.setFormat(start_index, length, rule["format"])
         self.setCurrentBlockState(0)
 
@@ -195,12 +262,12 @@ def bij_match(reference_cols, target_cols, ignore_not_found=False, score_thresho
     unmatched_orig_ref_cols = [
         ref_col for ref_col in reference_cols if ref_col not in final_mapping
     ]
-    
+
     available_orig_target_cols_for_fuzzy = [
-        norm_to_orig_target[norm_target_key] for norm_target_key in norm_target_list 
+        norm_to_orig_target[norm_target_key] for norm_target_key in norm_target_list
         if norm_target_key not in used_norm_target_cols
     ]
-    
+
     if FUZZYWUZZY_AVAILABLE and unmatched_orig_ref_cols and available_orig_target_cols_for_fuzzy:
         for orig_ref_col in unmatched_orig_ref_cols:
             if not available_orig_target_cols_for_fuzzy:
@@ -208,11 +275,11 @@ def bij_match(reference_cols, target_cols, ignore_not_found=False, score_thresho
                 continue
 
             best_match_info = process.extractOne(
-                orig_ref_col, 
-                available_orig_target_cols_for_fuzzy, 
+                orig_ref_col,
+                available_orig_target_cols_for_fuzzy,
                 scorer=fuzz.token_sort_ratio
             )
-            
+
             if best_match_info and best_match_info[1] >= score_threshold:
                 best_target_orig_name = best_match_info[0]
                 final_mapping[orig_ref_col] = best_target_orig_name
@@ -220,7 +287,7 @@ def bij_match(reference_cols, target_cols, ignore_not_found=False, score_thresho
                 used_norm_target_cols.add(normalize(best_target_orig_name))
             else:
                 final_mapping[orig_ref_col] = None
-    else: 
+    else:
         for orig_ref_col in unmatched_orig_ref_cols:
             final_mapping[orig_ref_col] = None
 
@@ -235,6 +302,8 @@ def bij_match(reference_cols, target_cols, ignore_not_found=False, score_thresho
 
 class DataTransformer(QMainWindow):
     MAX_PREVIEW_ROWS = 500
+    MERGE_KEY_PLACEHOLDER = "<Select Key>"
+
 
     def __init__(self, source_app=None, initial_df=None, df_name_hint=None, log_file_to_use=None, parent=None):
         super().__init__(parent)
@@ -247,14 +316,18 @@ class DataTransformer(QMainWindow):
         self.other_df_for_combine = None
         self.other_df_name_hint = None
         self.other_df_file_info = {}
-        
-        self.applied_expressions_history = {} 
+
+        self.applied_expressions_history = {}
 
         self.undo_stack = []
         self.redo_stack = []
 
         self.other_df_conversion_radio_button_groups = []
         self._temp_cols_for_batch_other_df = []
+
+        self.current_preview_page = 0
+        self.total_preview_pages = 0
+
 
         if self.current_log_file_path:
             logger.set_log_file(self.current_log_file_path, "DataTransformer (Continuing Session)", associated_data_file=self.df_name_hint)
@@ -277,43 +350,42 @@ class DataTransformer(QMainWindow):
             self.receive_dataframe(initial_df, self.df_name_hint, log_file_path_from_source=log_file_to_use)
         else:
             self._update_ui_for_data_state()
-        
-        if hasattr(self, 'create_modify_tab'): 
+            self.update_preview_table()
+
+        if hasattr(self, 'create_modify_tab'):
             self.tab_widget.setCurrentWidget(self.create_modify_tab)
 
         if hasattr(self, 'combine_data_tab') and hasattr(self, 'concat_sub_tab') and \
            hasattr(self, 'combine_operations_tab_widget') and hasattr(self, 'concat_type_combo'):
-            # Only set combine tab's sub-tab if combine tab itself is not the default
             if self.tab_widget.currentWidget() != self.combine_data_tab:
                  self.combine_operations_tab_widget.setCurrentWidget(self.concat_sub_tab)
-            
+
             idx = self.concat_type_combo.findData("custom_vertical_common")
             if idx != -1:
                 self.concat_type_combo.setCurrentIndex(idx)
-            else: 
+            else:
                 idx = self.concat_type_combo.findData("vertical_relaxed")
                 if idx != -1: self.concat_type_combo.setCurrentIndex(idx)
-
 
         self.statusBar().showMessage("Data Transformer ready.")
 
     def _create_actions(self):
         self.open_action = QAction(QIcon.fromTheme("document-open"), "&Open Primary Data File...", self)
         self.open_action.triggered.connect(self._handle_open_file_directly)
-        
+
         self.save_action = QAction(QIcon.fromTheme("document-save-as"), "&Save Transformed Data As...", self)
         self.save_action.triggered.connect(self._handle_save_file)
-        
+
         self.describe_df_action = QAction(QIcon.fromTheme("document-properties"), "&Describe Current DataFrame...", self)
         self.describe_df_action.triggered.connect(self._handle_describe_df)
-        
+
         self.exit_action = QAction(QIcon.fromTheme("application-exit"), "&Exit", self)
         self.exit_action.triggered.connect(self.close)
 
         self.undo_action = QAction(QIcon.fromTheme("edit-undo"), "&Undo", self)
         self.undo_action.triggered.connect(self._handle_undo)
         self.undo_action.setShortcut("Ctrl+Z")
-        
+
         self.redo_action = QAction(QIcon.fromTheme("edit-redo"), "&Redo", self)
         self.redo_action.triggered.connect(self._handle_redo)
         self.redo_action.setShortcut("Ctrl+Y")
@@ -321,9 +393,13 @@ class DataTransformer(QMainWindow):
         self.reset_action = QAction(QIcon.fromTheme("edit-delete"), "&Reset All Transformations", self)
         self.reset_action.triggered.connect(self._handle_reset_transformations)
 
-        self.send_to_source_action = QAction(QIcon.fromTheme("document-send"), "&Send Transformed Data to Source App", self)
+        self.send_to_source_action = QAction(QIcon.fromTheme("document-send"), "&Send Transformed Data to PickAxe", self)
         self.send_to_source_action.triggered.connect(self._handle_send_to_source)
         self.send_to_source_action.setEnabled(self.source_app is not None)
+
+        self.save_expressions_action = QAction(QIcon.fromTheme("document-save"), "Save &Applied Expressions As...", self)
+        self.save_expressions_action.triggered.connect(self._handle_save_applied_expressions)
+
 
     def _create_menubar(self):
         menubar = self.menuBar()
@@ -341,6 +417,7 @@ class DataTransformer(QMainWindow):
 
         data_menu = menubar.addMenu("&Data")
         data_menu.addAction(self.describe_df_action)
+        data_menu.addAction(self.save_expressions_action)
         data_menu.addSeparator()
         data_menu.addAction(self.send_to_source_action)
 
@@ -356,13 +433,18 @@ class DataTransformer(QMainWindow):
         main_v_layout.addWidget(self.splitter)
 
         self.tab_widget = QTabWidget()
-        self._setup_create_fields_tab() 
+        self._setup_create_fields_tab()
         self._setup_reshape_tab()
-        self._setup_combine_tab() 
+        self._setup_combine_tab()
         self.splitter.addWidget(self.tab_widget)
 
-        preview_group = QGroupBox("DataFrame Preview (Max 500 rows)")
+        preview_group = QGroupBox("DataFrame Preview")
         preview_layout = QVBoxLayout(preview_group)
+
+        self.preview_df_title_label = QLabel("<b>Preview: No Data</b>")
+        self.preview_df_title_label.setAlignment(Qt.AlignCenter)
+        preview_layout.addWidget(self.preview_df_title_label)
+
         self.preview_table = QTableView()
         self.preview_table.setAlternatingRowColors(True)
         self.preview_table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -370,55 +452,80 @@ class DataTransformer(QMainWindow):
         self.preview_table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.preview_table.horizontalHeader().setStretchLastSection(False)
         preview_layout.addWidget(self.preview_table)
+
+        nav_layout = QHBoxLayout()
+        self.first_page_button = QPushButton("<< First")
+        self.first_page_button.clicked.connect(self._handle_first_page_preview)
+        nav_layout.addWidget(self.first_page_button)
+
+        self.prev_page_button = QPushButton("< Prev")
+        self.prev_page_button.clicked.connect(self._handle_prev_page_preview)
+        nav_layout.addWidget(self.prev_page_button)
+
+        self.page_info_label = QLabel("Page 0/0")
+        self.page_info_label.setAlignment(Qt.AlignCenter)
+        nav_layout.addWidget(self.page_info_label)
+
+        self.next_page_button = QPushButton("Next >")
+        self.next_page_button.clicked.connect(self._handle_next_page_preview)
+        nav_layout.addWidget(self.next_page_button)
+
+        self.last_page_button = QPushButton("Last >>")
+        self.last_page_button.clicked.connect(self._handle_last_page_preview)
+        nav_layout.addWidget(self.last_page_button)
+
+        preview_layout.addLayout(nav_layout)
         self.splitter.addWidget(preview_group)
 
         self.splitter.setSizes([int(self.height() * 0.65), int(self.height() * 0.35)])
-
         self.status_bar = self.statusBar()
 
-
     def _setup_create_fields_tab(self):
-        self.create_modify_tab = QWidget() 
-        main_layout = QHBoxLayout(self.create_modify_tab) 
+        self.create_modify_tab = QWidget()
+        main_layout = QHBoxLayout(self.create_modify_tab)
 
         self.create_fields_main_splitter = QSplitter(Qt.Horizontal)
         main_layout.addWidget(self.create_fields_main_splitter)
 
         self.helper_groupbox = QGroupBox("Polars Expression Helper & Examples")
-        helper_left_layout = QVBoxLayout(self.helper_groupbox) 
+        helper_left_layout = QVBoxLayout(self.helper_groupbox)
         self.polars_helper_text = QTextBrowser()
         self.polars_helper_text.setOpenExternalLinks(True)
-        self._populate_polars_helper_text() 
+        self._populate_polars_helper_text()
         helper_left_layout.addWidget(self.polars_helper_text)
-        
+
         self.create_fields_main_splitter.addWidget(self.helper_groupbox)
 
         right_pane_main_widget = QWidget()
         right_pane_main_layout = QVBoxLayout(right_pane_main_widget)
-        right_pane_main_layout.setContentsMargins(0,0,0,0) 
-        
+        right_pane_main_layout.setContentsMargins(0,0,0,0)
+
         self.toggle_helper_button = QPushButton("Hide Helper")
         self.toggle_helper_button.setCheckable(True)
-        self.toggle_helper_button.setChecked(True) 
+        self.toggle_helper_button.setChecked(True)
         self.toggle_helper_button.clicked.connect(self._toggle_polars_helper)
         right_pane_main_layout.addWidget(self.toggle_helper_button, 0, Qt.AlignRight)
 
-
-        self.create_fields_right_pane_splitter = QSplitter(Qt.Vertical) # Renamed for clarity
+        self.create_fields_right_pane_splitter = QSplitter(Qt.Vertical)
         right_pane_main_layout.addWidget(self.create_fields_right_pane_splitter)
 
         top_right_widget = QWidget()
-        top_right_h_layout = QHBoxLayout(top_right_widget)
+        self.top_right_columns_expressions_splitter = QSplitter(Qt.Horizontal, top_right_widget)
+
+        layout_for_top_right_splitter = QHBoxLayout(top_right_widget)
+        layout_for_top_right_splitter.addWidget(self.top_right_columns_expressions_splitter)
+        layout_for_top_right_splitter.setContentsMargins(0,0,0,0)
+
 
         self.available_cols_group_create = QGroupBox("Available Columns (Current DF)")
         col_list_layout = QVBoxLayout(self.available_cols_group_create)
-        self.available_cols_list_create = self._create_checkbox_list_widget() 
+        self.available_cols_list_create = self._create_checkbox_list_widget()
         self.available_cols_list_create.itemDoubleClicked.connect(self._insert_col_into_expression_from_checkbox_list)
         col_list_layout.addWidget(self.available_cols_list_create)
         self.delete_fields_button = QPushButton("Delete Selected Field(s)")
         self.delete_fields_button.clicked.connect(self._handle_delete_fields)
         col_list_layout.addWidget(self.delete_fields_button)
-        top_right_h_layout.addWidget(self.available_cols_group_create)
+        self.top_right_columns_expressions_splitter.addWidget(self.available_cols_group_create)
 
         self.applied_expressions_group = QGroupBox("Applied Expressions Log (Latest per Field)")
         applied_expr_layout = QVBoxLayout(self.applied_expressions_group)
@@ -429,16 +536,18 @@ class DataTransformer(QMainWindow):
         self.applied_expressions_log_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.applied_expressions_log_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.applied_expressions_log_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        self.applied_expressions_log_table.setSelectionBehavior(QAbstractItemView.SelectRows) # Allow row selection for potential copy
+        self.applied_expressions_log_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         applied_expr_layout.addWidget(self.applied_expressions_log_table)
-        top_right_h_layout.addWidget(self.applied_expressions_group)
-        
+        self.top_right_columns_expressions_splitter.addWidget(self.applied_expressions_group)
+
+        self.top_right_columns_expressions_splitter.setSizes([int(self.width() * 0.65 * 0.3), int(self.width() * 0.65 * 0.7)])
+
         self.create_fields_right_pane_splitter.addWidget(top_right_widget)
 
 
-        self.expression_input_group = QGroupBox("Expression Details") 
+        self.expression_input_group = QGroupBox("Expression Details")
         input_layout = QGridLayout(self.expression_input_group)
-        
+
         input_layout.addWidget(QLabel("New/Existing Field Name:"), 0, 0)
         self.new_field_name_edit = QLineEdit()
         self.new_field_name_edit.setPlaceholderText("e.g., 'new_col' or 'existing_col_to_overwrite'")
@@ -447,19 +556,19 @@ class DataTransformer(QMainWindow):
         input_layout.addWidget(QLabel("Polars Expression:"), 1, 0, Qt.AlignTop)
         self.polars_expression_edit = QTextEdit()
         self.polars_expression_edit.setPlaceholderText("e.g., pl.col('some_col') + pl.col('other_col')")
-        self.polars_expression_edit.setMinimumHeight(120) 
+        self.polars_expression_edit.setMinimumHeight(120)
         self.polars_syntax_highlighter = PolarsSyntaxHighlighter(self.polars_expression_edit.document())
         input_layout.addWidget(self.polars_expression_edit, 1, 1)
-        
+
         self.apply_expression_button = QPushButton("Apply Expression")
         self.apply_expression_button.clicked.connect(self._handle_apply_expression)
         input_layout.addWidget(self.apply_expression_button, 2, 0, 1, 2)
         self.create_fields_right_pane_splitter.addWidget(self.expression_input_group)
-        
+
         self.create_fields_main_splitter.addWidget(right_pane_main_widget)
-        
+
         self.create_fields_main_splitter.setSizes([int(self.width() * 0.35), int(self.width() * 0.65)])
-        self.create_fields_right_pane_splitter.setSizes([int(self.height() * 0.4), int(self.height() * 0.25)]) # Adjusted for more space for expression box
+        self.create_fields_right_pane_splitter.setSizes([int(self.height() * 0.4), int(self.height() * 0.25)])
 
 
         self.tab_widget.addTab(self.create_modify_tab, "Create/Modify Fields")
@@ -546,29 +655,18 @@ class DataTransformer(QMainWindow):
 
     def _toggle_polars_helper(self):
         is_checked = self.toggle_helper_button.isChecked()
-        self.helper_groupbox.setVisible(is_checked) # This is correct
+        self.helper_groupbox.setVisible(is_checked)
         self.toggle_helper_button.setText("Hide Helper" if is_checked else "Show Helper")
-        # No need to manipulate splitter sizes directly if setVisible works as expected on a top-level widget in splitter.
-        # If self.helper_groupbox is the widget directly added to splitter:
-        # current_sizes = self.create_fields_main_splitter.sizes()
-        # if is_checked: # Show
-        #     if current_sizes[0] < 50: # If it was effectively hidden
-        #         self.create_fields_main_splitter.setSizes([300, max(50, current_sizes[1])]) # Restore or set default
-        # else: # Hide
-        #     self.create_fields_main_splitter.setSizes([0, sum(current_sizes)])
 
-
-    def _insert_col_into_expression(self, item_widget): 
-        # item is QListWidgetItem from a _create_checkbox_list_widget
-        # The text is on the checkbox, which is the item's widget
-        if isinstance(item_widget, QListWidgetItem): # Check if it's the item itself
-            widget = self.available_cols_list_create.itemWidget(item_widget) # Get the checkbox
+    def _insert_col_into_expression(self, item_widget):
+        if isinstance(item_widget, QListWidgetItem):
+            widget = self.available_cols_list_create.itemWidget(item_widget)
             if isinstance(widget, QCheckBox):
                 col_name_with_type = widget.text()
                 col_name = col_name_with_type.split(" (")[0]
                 self.polars_expression_edit.insertPlainText(f"pl.col('{col_name}')")
 
-    def _insert_col_into_expression_from_checkbox_list(self, item): # item is QListWidgetItem
+    def _insert_col_into_expression_from_checkbox_list(self, item):
         widget = self.available_cols_list_create.itemWidget(item)
         if isinstance(widget, QCheckBox):
             col_name_with_type = widget.text()
@@ -577,11 +675,11 @@ class DataTransformer(QMainWindow):
 
 
     def _setup_reshape_tab(self):
-        tab = QWidget() 
+        tab = QWidget()
         main_reshape_layout = QVBoxLayout(tab)
 
         reshape_help_layout = QHBoxLayout()
-        reshape_help_layout.addStretch() 
+        reshape_help_layout.addStretch()
         reshape_help_button = QPushButton("?")
         reshape_help_button.setFixedSize(25,25)
         reshape_help_button.setToolTip("Help on Pivoting and Melting Data")
@@ -594,88 +692,116 @@ class DataTransformer(QMainWindow):
 
         # --- Pivot Sub-Tab ---
         pivot_sub_tab = QWidget()
-        pivot_main_layout = QVBoxLayout(pivot_sub_tab) 
-        
+        pivot_main_layout = QVBoxLayout(pivot_sub_tab)
+
         pivot_instruction = QLabel("<b>Pivot:</b> Transforms data from a 'long' format to a 'wider' format by turning unique values from one column into new column headers.")
         pivot_instruction.setWordWrap(True)
         pivot_main_layout.addWidget(pivot_instruction)
 
-        pivot_group = QGroupBox("Pivot Configuration") 
+        pivot_group = QGroupBox("Pivot Configuration")
         pivot_layout = QGridLayout(pivot_group)
-        
+
         pivot_layout.addWidget(QLabel("Index Column(s) (Rows in Excel Pivot):"), 0, 0, Qt.AlignTop)
         self.pivot_index_cols_list = self._create_checkbox_list_widget()
-        pivot_layout.addWidget(self.pivot_index_cols_list, 0, 1, 1, 2) # Span 1 row, 2 cols for list
+        pivot_layout.addWidget(self.pivot_index_cols_list, 0, 1, 1, 2)
 
         pivot_layout.addWidget(QLabel("Columns (from values of) (Columns in Excel Pivot):"), 1, 0)
         self.pivot_columns_col_combo = QComboBox()
+        self.pivot_columns_col_combo.currentIndexChanged.connect(self._update_pivot_diagram)
         pivot_layout.addWidget(self.pivot_columns_col_combo, 1, 1)
 
         pivot_layout.addWidget(QLabel("Values (populate new cols) (Values in Excel Pivot):"), 2, 0)
         self.pivot_values_col_combo = QComboBox()
+        self.pivot_values_col_combo.currentIndexChanged.connect(self._update_pivot_diagram)
         pivot_layout.addWidget(self.pivot_values_col_combo, 2, 1)
 
         pivot_agg_group = QGroupBox("Aggregation for Duplicates")
         pivot_agg_layout = QHBoxLayout(pivot_agg_group)
         pivot_agg_layout.addWidget(QLabel("Function:"))
         self.pivot_agg_func_combo = QComboBox()
-        self.pivot_agg_func_combo.addItems(["first", "sum", "mean", "median", "min", "max", "count", "list"])
+        self.pivot_agg_func_combo.addItems(["sum", "mean", "median", "min", "max", "count", "first", "last", "list"])
         pivot_agg_layout.addWidget(self.pivot_agg_func_combo)
-        pivot_layout.addWidget(pivot_agg_group, 1, 2, 2, 1) # Span 2 rows
+        pivot_layout.addWidget(pivot_agg_group, 1, 2, 2, 1)
 
         self.apply_pivot_button = QPushButton("Apply Pivot")
         self.apply_pivot_button.clicked.connect(self._handle_apply_pivot)
-        pivot_layout.addWidget(self.apply_pivot_button, 3, 0, 1, 3) # Span all columns in grid
+        pivot_layout.addWidget(self.apply_pivot_button, 3, 0, 1, 3)
+
+        self.pivot_diagram_label = QLabel("<i>Diagram: Select options to see transformation preview.</i>")
+        self.pivot_diagram_label.setAlignment(Qt.AlignCenter)
+        self.pivot_diagram_label.setWordWrap(True)
+        self.pivot_diagram_label.setStyleSheet("font-style: italic; color: gray; margin-top: 5px; border: 1px dashed #ccc; padding: 5px;")
+        pivot_layout.addWidget(self.pivot_diagram_label, 4, 0, 1, 3)
+
+        self.revert_pivot_button = QPushButton("Revert Last Pivot")
+        self.revert_pivot_button.clicked.connect(self._handle_revert_last_pivot)
+        pivot_layout.addWidget(self.revert_pivot_button, 5, 0, 1, 3, Qt.AlignCenter)
+
         pivot_main_layout.addWidget(pivot_group)
         pivot_main_layout.addStretch()
         self.reshape_sub_tab_widget.addTab(pivot_sub_tab, "Pivot")
 
         # --- Melt Sub-Tab ---
         melt_sub_tab = QWidget()
-        melt_main_layout = QVBoxLayout(melt_sub_tab) 
-        
+        melt_main_layout = QVBoxLayout(melt_sub_tab)
+
         melt_instruction = QLabel("<b>Melt (Unpivot):</b> Transforms data from a 'wide' format to a 'longer' format by stacking specified columns into key-value pairs.")
         melt_instruction.setWordWrap(True)
         melt_main_layout.addWidget(melt_instruction)
 
-        melt_group = QGroupBox("Melt Configuration") 
+        melt_group = QGroupBox("Melt Configuration")
         melt_layout = QGridLayout(melt_group)
 
         id_vars_group = QGroupBox("Identifier Columns (to keep as is)")
         id_vars_layout = QVBoxLayout(id_vars_group)
         self.melt_id_vars_list = self._create_checkbox_list_widget()
         id_vars_layout.addWidget(self.melt_id_vars_list)
-        melt_layout.addWidget(id_vars_group, 0, 0, 1, 2) # Span 2 cols
+        melt_layout.addWidget(id_vars_group, 0, 0, 1, 2)
 
         value_vars_group = QGroupBox("Columns to Unpivot (Value Variables - Optional)")
         value_vars_layout = QVBoxLayout(value_vars_group)
         self.melt_value_vars_list = self._create_checkbox_list_widget()
         self.melt_value_vars_list.setToolTip("If empty, all columns NOT selected as ID Variables will be unpivoted.")
         value_vars_layout.addWidget(self.melt_value_vars_list)
-        melt_layout.addWidget(value_vars_group, 0, 2, 1, 2) # Span 2 cols
-        
+        melt_layout.addWidget(value_vars_group, 0, 2, 1, 2)
+
         output_names_group = QGroupBox("Output Column Names")
         output_names_layout = QGridLayout(output_names_group)
         output_names_layout.addWidget(QLabel("New 'Variable' Column Name:"), 0, 0)
         self.melt_variable_name_edit = QLineEdit("variable")
+        self.melt_variable_name_edit.textChanged.connect(self._update_melt_diagram)
         output_names_layout.addWidget(self.melt_variable_name_edit, 0, 1)
         output_names_layout.addWidget(QLabel("New 'Value' Column Name:"), 1, 0)
         self.melt_value_name_edit = QLineEdit("value")
+        self.melt_value_name_edit.textChanged.connect(self._update_melt_diagram)
         output_names_layout.addWidget(self.melt_value_name_edit, 1, 1)
-        melt_layout.addWidget(output_names_group, 1, 0, 1, 4) # Span all
+        melt_layout.addWidget(output_names_group, 1, 0, 1, 4)
 
         self.apply_melt_button = QPushButton("Apply Melt")
         self.apply_melt_button.clicked.connect(self._handle_apply_melt)
-        melt_layout.addWidget(self.apply_melt_button, 2, 0, 1, 4) 
+        melt_layout.addWidget(self.apply_melt_button, 2, 0, 1, 4)
+
+        self.melt_diagram_label = QLabel("<i>Diagram: Select options to see transformation preview.</i>")
+        self.melt_diagram_label.setAlignment(Qt.AlignCenter)
+        self.melt_diagram_label.setWordWrap(True)
+        self.melt_diagram_label.setStyleSheet("font-style: italic; color: gray; margin-top: 5px; border: 1px dashed #ccc; padding: 5px;")
+        melt_layout.addWidget(self.melt_diagram_label, 3, 0, 1, 4)
+
+        self.revert_melt_button = QPushButton("Revert Last Melt")
+        self.revert_melt_button.clicked.connect(self._handle_revert_last_melt)
+        melt_layout.addWidget(self.revert_melt_button, 4, 0, 1, 4, Qt.AlignCenter)
+
         melt_main_layout.addWidget(melt_group)
         melt_main_layout.addStretch()
         self.reshape_sub_tab_widget.addTab(melt_sub_tab, "Melt (Unpivot)")
-        
+
         self.tab_widget.addTab(tab, "Reshape Data (Pivot/Melt)")
+        self._update_pivot_diagram()
+        self._update_melt_diagram()
 
 
     def _setup_combine_tab(self):
-        self.combine_data_tab = QWidget() 
+        self.combine_data_tab = QWidget()
         main_combine_layout = QVBoxLayout(self.combine_data_tab)
 
         load_other_group = QGroupBox("Load 'Other' DataFrame for Combining")
@@ -693,7 +819,7 @@ class DataTransformer(QMainWindow):
 
         manage_other_group = QGroupBox("Manage 'Other' DataFrame Columns & Types")
         manage_other_layout = QHBoxLayout(manage_other_group)
-        self.other_df_cols_list = self._create_checkbox_list_widget() 
+        self.other_df_cols_list = self._create_checkbox_list_widget()
         manage_other_layout.addWidget(self.other_df_cols_list, 2)
 
         type_management_vlayout = QVBoxLayout()
@@ -713,7 +839,7 @@ class DataTransformer(QMainWindow):
 
         self.combine_operations_tab_widget = QTabWidget()
         self._setup_merge_sub_tab()
-        self._setup_concat_sub_tab() 
+        self._setup_concat_sub_tab()
         main_combine_layout.addWidget(self.combine_operations_tab_widget)
 
         self.tab_widget.addTab(self.combine_data_tab, "Combine Data (Merge/Concatenate)")
@@ -731,40 +857,177 @@ class DataTransformer(QMainWindow):
         merge_header_layout.addWidget(merge_help_button)
         layout.addLayout(merge_header_layout)
 
+        # Key Mapping Table
+        keys_group = QGroupBox("Join Key Mapping")
+        keys_layout = QVBoxLayout(keys_group)
 
-        keys_layout = QGridLayout()
-        keys_layout.addWidget(QLabel("Current DF Key(s) (Left):"), 0, 0, Qt.AlignTop)
-        self.merge_left_keys_list = self._create_checkbox_list_widget()
-        keys_layout.addWidget(self.merge_left_keys_list, 0, 1) 
+        self.merge_key_mapping_table = QTableWidget()
+        self.merge_key_mapping_table.setColumnCount(3)
+        self.merge_key_mapping_table.setHorizontalHeaderLabels(["Use for Join", "Current DF Key", "'Other' DF Key"])
+        self.merge_key_mapping_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.merge_key_mapping_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.merge_key_mapping_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.merge_key_mapping_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.merge_key_mapping_table.setSelectionBehavior(QAbstractItemView.SelectRows) # For row deletion
+        keys_layout.addWidget(self.merge_key_mapping_table)
 
-        keys_layout.addWidget(QLabel("'Other' DF Key(s) (Right):"), 1, 0, Qt.AlignTop)
-        self.merge_right_on_list = self._create_checkbox_list_widget()
-        keys_layout.addWidget(self.merge_right_on_list, 1, 1) 
-        layout.addLayout(keys_layout)
+        key_buttons_layout = QHBoxLayout()
+        self.add_merge_key_button = QPushButton("Add Key Pair")
+        self.add_merge_key_button.clicked.connect(self._add_merge_key_pair_row)
+        key_buttons_layout.addWidget(self.add_merge_key_button)
 
+        self.remove_merge_key_button = QPushButton("Remove Selected Key Pair(s)")
+        self.remove_merge_key_button.clicked.connect(self._remove_selected_merge_key_pair_rows)
+        key_buttons_layout.addWidget(self.remove_merge_key_button)
+        key_buttons_layout.addStretch()
+        keys_layout.addLayout(key_buttons_layout)
+        layout.addWidget(keys_group)
+
+        # Merge Options (Join Type, Suffix)
         options_layout = QGridLayout()
         options_layout.addWidget(QLabel("Join Type:"), 0, 0)
         self.merge_how_combo = QComboBox()
         self.merge_how_combo.addItems(["inner", "left", "outer", "semi", "anti", "cross"])
+        self.merge_how_combo.currentIndexChanged.connect(self._on_merge_how_changed) # To disable keys for cross
         options_layout.addWidget(self.merge_how_combo, 0, 1)
 
         options_layout.addWidget(QLabel("Suffix for overlapping columns (from 'Other DF'):"), 1, 0)
-        self.merge_suffix_edit = QLineEdit("_other") 
+        self.merge_suffix_edit = QLineEdit("_other")
         options_layout.addWidget(self.merge_suffix_edit, 1, 1)
         layout.addLayout(options_layout)
-        
-        self.merge_select_cols_checkbox = QCheckBox("Select specific columns for output (advanced)")
-        self.merge_select_cols_checkbox.setEnabled(False)
-        layout.addWidget(self.merge_select_cols_checkbox)
 
         self.apply_merge_button = QPushButton("Apply Merge/Join")
         self.apply_merge_button.clicked.connect(self._handle_apply_merge)
         layout.addWidget(self.apply_merge_button, alignment=Qt.AlignCenter)
         layout.addStretch()
         self.combine_operations_tab_widget.addTab(sub_tab, "Merge / Join")
+        self._populate_merge_key_mapping_table() # Initial population
+
+    def _on_merge_how_changed(self):
+        is_cross_join = self.merge_how_combo.currentText() == "cross"
+        self.merge_key_mapping_table.setEnabled(not is_cross_join)
+        self.add_merge_key_button.setEnabled(not is_cross_join)
+        self.remove_merge_key_button.setEnabled(not is_cross_join)
+        if is_cross_join:
+            self.merge_key_mapping_table.setToolTip("Key mapping is not applicable for cross joins.")
+        else:
+            self.merge_key_mapping_table.setToolTip("")
+
+
+    def _add_merge_key_pair_row(self, left_key_preselect=None, right_key_preselect=None):
+        current_row_count = self.merge_key_mapping_table.rowCount()
+        self.merge_key_mapping_table.insertRow(current_row_count)
+
+        # Checkbox for "Use for Join"
+        chk_use_widget = QWidget()
+        chk_layout = QHBoxLayout(chk_use_widget)
+        chk_box = QCheckBox()
+        chk_box.setChecked(True)
+        chk_layout.addWidget(chk_box)
+        chk_layout.setAlignment(Qt.AlignCenter)
+        chk_layout.setContentsMargins(0,0,0,0)
+        self.merge_key_mapping_table.setCellWidget(current_row_count, 0, chk_use_widget)
+
+        # ComboBox for Current DF Key
+        combo_left = QComboBox()
+        combo_left.addItem(self.MERGE_KEY_PLACEHOLDER)
+        if self.current_df is not None:
+            combo_left.addItems(self.current_df.columns)
+        if left_key_preselect and left_key_preselect in self.current_df.columns:
+            combo_left.setCurrentText(left_key_preselect)
+        self.merge_key_mapping_table.setCellWidget(current_row_count, 1, combo_left)
+
+        # ComboBox for Other DF Key
+        combo_right = QComboBox()
+        combo_right.addItem(self.MERGE_KEY_PLACEHOLDER)
+        if self.other_df_for_combine is not None:
+            combo_right.addItems(self.other_df_for_combine.columns)
+        if right_key_preselect and right_key_preselect in self.other_df_for_combine.columns:
+            combo_right.setCurrentText(right_key_preselect)
+        self.merge_key_mapping_table.setCellWidget(current_row_count, 2, combo_right)
+        self.merge_key_mapping_table.resizeRowsToContents()
+
+    def _remove_selected_merge_key_pair_rows(self):
+        selected_rows = sorted(list(set(index.row() for index in self.merge_key_mapping_table.selectedIndexes())), reverse=True)
+        if not selected_rows:
+            if self.merge_key_mapping_table.rowCount() > 0: # If no selection, remove last row if exists
+                 selected_rows = [self.merge_key_mapping_table.rowCount() - 1]
+            else:
+                return # No rows to remove
+
+        for row in selected_rows:
+            self.merge_key_mapping_table.removeRow(row)
+        
+        if self.merge_key_mapping_table.rowCount() == 0 and self.current_df is not None and self.other_df_for_combine is not None:
+            self._populate_merge_key_mapping_table() # Add one back if all removed but data exists
+
+
+    def _populate_merge_key_mapping_table(self):
+        if not hasattr(self, 'merge_key_mapping_table'): return
+        self.merge_key_mapping_table.setRowCount(0) # Clear existing rows
+
+        if self.current_df is not None and not self.current_df.is_empty() and \
+           self.other_df_for_combine is not None and not self.other_df_for_combine.is_empty():
+            
+            # Try to find one good initial match for the first row
+            current_cols = self.current_df.columns
+            other_cols = self.other_df_for_combine.columns
+            
+            # Simple heuristic for pre-selection: common "ID" like columns or first common column
+            preselect_left, preselect_right = None, None
+            common_id_cols = [c for c in current_cols if c.lower() in ["id", "identifier", "key"] and c in other_cols]
+            if common_id_cols:
+                preselect_left = preselect_right = common_id_cols[0]
+            else: # Try bij_match for a single best pair
+                matches = bij_match(current_cols[:1], other_cols, ignore_not_found=True, score_threshold=85)
+                if matches and current_cols:
+                    first_current_col = current_cols[0]
+                    if first_current_col in matches and matches[first_current_col] is not None:
+                        preselect_left = first_current_col
+                        preselect_right = matches[first_current_col]
+
+            self._add_merge_key_pair_row(preselect_left, preselect_right)
+        else: # No data or one of the DFs is missing, ensure table is clear
+            self.merge_key_mapping_table.setRowCount(0)
+        self._on_merge_how_changed() # Update enabled state based on join type
+
+    def _get_merge_key_mapping_from_table(self):
+        left_on_keys = []
+        right_on_keys = []
+        valid_mapping = True
+
+        for row in range(self.merge_key_mapping_table.rowCount()):
+            use_checkbox_widget = self.merge_key_mapping_table.cellWidget(row, 0)
+            use_this_pair = False
+            if use_checkbox_widget and isinstance(use_checkbox_widget.layout().itemAt(0).widget(), QCheckBox):
+                use_this_pair = use_checkbox_widget.layout().itemAt(0).widget().isChecked()
+
+            if not use_this_pair:
+                continue
+
+            left_combo = self.merge_key_mapping_table.cellWidget(row, 1)
+            right_combo = self.merge_key_mapping_table.cellWidget(row, 2)
+
+            if not left_combo or not right_combo:
+                valid_mapping = False; break 
+
+            left_key = left_combo.currentText()
+            right_key = right_combo.currentText()
+
+            if left_key == self.MERGE_KEY_PLACEHOLDER or right_key == self.MERGE_KEY_PLACEHOLDER:
+                self._show_error_message("Merge Key Error", f"Key selection incomplete at row {row + 1}. Please select keys for both DataFrames.")
+                valid_mapping = False; break
+            
+            left_on_keys.append(left_key)
+            right_on_keys.append(right_key)
+
+        if not valid_mapping:
+            return None, None # Indicate error
+        
+        return left_on_keys, right_on_keys
 
     def _setup_concat_sub_tab(self):
-        self.concat_sub_tab = QWidget() 
+        self.concat_sub_tab = QWidget()
         main_concat_layout = QVBoxLayout(self.concat_sub_tab)
 
         top_label_layout = QHBoxLayout()
@@ -781,7 +1044,7 @@ class DataTransformer(QMainWindow):
 
         options_widget = QWidget()
         options_layout_v = QVBoxLayout(options_widget)
-        
+
         options_group = QGroupBox("Concatenation Options")
         options_grid_layout = QGridLayout(options_group)
 
@@ -791,7 +1054,7 @@ class DataTransformer(QMainWindow):
         self.concat_type_combo.addItem("Vertical Strict (Stack, exact schema match required)", "vertical")
         self.concat_type_combo.addItem("Vertical Common Columns (Stack, only common columns kept)", "custom_vertical_common")
         self.concat_type_combo.addItem("Diagonal Relaxed (Stack, align common, null fill, supercast)", "diagonal_relaxed")
-        self.concat_type_combo.addItem("Horizontal (Side-by-Side)", "horizontal") 
+        self.concat_type_combo.addItem("Horizontal (Side-by-Side)", "horizontal")
         self.concat_type_combo.addItem("Align (Experimental - Align by 1st col, then horizontal)", "align")
         self.concat_type_combo.addItem("Align Full (Experimental - Outer align by 1st col, then horizontal)", "align_full")
         self.concat_type_combo.addItem("Align Inner (Experimental - Inner align by 1st col, then horizontal)", "align_inner")
@@ -803,16 +1066,16 @@ class DataTransformer(QMainWindow):
         self.concat_rechunk_check = QCheckBox("Rechunk after concatenate (recommended)")
         self.concat_rechunk_check.setChecked(True)
         options_grid_layout.addWidget(self.concat_rechunk_check, 1, 0, 1, 2)
-        
+
         options_layout_v.addWidget(options_group)
         options_layout_v.addStretch()
         concat_splitter.addWidget(options_widget)
 
         self.mapping_group_concat = QGroupBox("Column Mapping")
         concat_mapping_layout = QVBoxLayout(self.mapping_group_concat)
-        
+
         self.concat_column_mapping_table = QTableWidget()
-        self.concat_column_mapping_table.setColumnCount(4) 
+        self.concat_column_mapping_table.setColumnCount(4)
         self.concat_column_mapping_table.setHorizontalHeaderLabels(["Include", "Current DF Column", "Maps To (Other DF)", "Output Name"])
         self.concat_column_mapping_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.concat_column_mapping_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
@@ -820,11 +1083,11 @@ class DataTransformer(QMainWindow):
         self.concat_column_mapping_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
         self.concat_column_mapping_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         concat_mapping_layout.addWidget(self.concat_column_mapping_table)
-        
+
         self.refresh_mapping_button = QPushButton("Refresh / Auto-Match Column Mapping")
         self.refresh_mapping_button.clicked.connect(self._populate_concat_column_mapping_table)
         concat_mapping_layout.addWidget(self.refresh_mapping_button)
-        
+
         concat_splitter.addWidget(self.mapping_group_concat)
         concat_splitter.setSizes([int(self.width() * 0.35), int(self.width() * 0.65)])
 
@@ -832,40 +1095,38 @@ class DataTransformer(QMainWindow):
         self.apply_concat_button = QPushButton("Apply Concatenate")
         self.apply_concat_button.clicked.connect(self._handle_apply_concat)
         main_concat_layout.addWidget(self.apply_concat_button, 0, Qt.AlignCenter)
-        
-        self.combine_operations_tab_widget.addTab(self.concat_sub_tab, "Concatenate")
-        self._on_concat_type_changed() 
 
-    def _on_concat_type_changed(self, index=None): 
+        self.combine_operations_tab_widget.addTab(self.concat_sub_tab, "Concatenate")
+        self._on_concat_type_changed()
+
+    def _on_concat_type_changed(self, index=None):
         how_str = self.concat_type_combo.currentData()
-        if how_str is None: 
+        if how_str is None:
             current_idx = self.concat_type_combo.currentIndex()
             if current_idx >=0: how_str = self.concat_type_combo.itemData(current_idx)
-        
-        # Always keep the mapping group visible, but control interactivity
-        self.mapping_group_concat.setVisible(True) # Always visible
 
-        is_interactive_mapping_mode = (how_str == "horizontal") 
+        self.mapping_group_concat.setVisible(True)
+
+        is_interactive_mapping_mode = (how_str == "horizontal")
         is_info_mapping_mode = (how_str == "custom_vertical_common")
 
         if self.current_df is not None and self.other_df_for_combine is not None:
-            self._populate_concat_column_mapping_table() # Populate first
+            self._populate_concat_column_mapping_table()
             for row in range(self.concat_column_mapping_table.rowCount()):
                 chk_widget = self.concat_column_mapping_table.cellWidget(row, 0)
-                if chk_widget: 
+                if chk_widget:
                     checkbox = chk_widget.findChild(QCheckBox)
-                    if checkbox: checkbox.setEnabled(is_interactive_mapping_mode) # Only editable for horizontal
+                    if checkbox: checkbox.setEnabled(is_interactive_mapping_mode)
 
                 combo_widget = self.concat_column_mapping_table.cellWidget(row, 2)
-                if combo_widget: 
+                if combo_widget:
                     combo_widget.setEnabled(is_interactive_mapping_mode)
-                
+
                 edit_widget = self.concat_column_mapping_table.cellWidget(row, 3)
-                if edit_widget: 
-                    edit_widget.setEnabled(is_interactive_mapping_mode) # Output name mainly for horizontal
+                if edit_widget:
+                    edit_widget.setEnabled(is_interactive_mapping_mode)
         else:
             self.concat_column_mapping_table.setRowCount(0)
-
 
     def _populate_concat_column_mapping_table(self):
         self.concat_column_mapping_table.setRowCount(0)
@@ -875,16 +1136,16 @@ class DataTransformer(QMainWindow):
 
         current_cols = self.current_df.columns
         other_cols = self.other_df_for_combine.columns
-        
+
         initial_matches_dict = bij_match(current_cols, other_cols, ignore_not_found=False)
 
         self.concat_column_mapping_table.setRowCount(len(current_cols))
 
         for row, current_col_name in enumerate(current_cols):
-            chk_include_widget = QWidget() 
+            chk_include_widget = QWidget()
             chk_include_layout = QHBoxLayout(chk_include_widget)
             chk_include = QCheckBox()
-            chk_include.setChecked(True) 
+            chk_include.setChecked(True)
             chk_include_layout.addWidget(chk_include)
             chk_include_layout.setAlignment(Qt.AlignCenter)
             chk_include_layout.setContentsMargins(0,0,0,0)
@@ -895,26 +1156,25 @@ class DataTransformer(QMainWindow):
             self.concat_column_mapping_table.setItem(row, 1, item_current_col)
 
             combo_maps_to = QComboBox(self.concat_column_mapping_table)
-            combo_maps_to.addItem("<None>") 
+            combo_maps_to.addItem("<None>")
             combo_maps_to.addItems(other_cols)
-            
+
             matched_other_col = initial_matches_dict.get(current_col_name)
             if matched_other_col and matched_other_col in other_cols:
                 idx = combo_maps_to.findText(matched_other_col)
                 if idx !=-1: combo_maps_to.setCurrentIndex(idx)
-                else: combo_maps_to.setCurrentIndex(0) 
+                else: combo_maps_to.setCurrentIndex(0)
             else:
-                combo_maps_to.setCurrentIndex(0) 
-            
+                combo_maps_to.setCurrentIndex(0)
+
             self.concat_column_mapping_table.setCellWidget(row, 2, combo_maps_to)
 
             output_name_edit = QLineEdit(self.concat_column_mapping_table)
-            output_name_edit.setText(current_col_name) 
+            output_name_edit.setText(current_col_name)
             output_name_edit.setPlaceholderText(f"Default: '{current_col_name}'")
             self.concat_column_mapping_table.setCellWidget(row, 3, output_name_edit)
-            
-        self.concat_column_mapping_table.resizeColumnToContents(0)
 
+        self.concat_column_mapping_table.resizeColumnToContents(0)
 
     def _get_concat_column_mapping_from_table(self):
         mapping_config = []
@@ -927,16 +1187,16 @@ class DataTransformer(QMainWindow):
             output_name_edit = self.concat_column_mapping_table.cellWidget(row, 3)
 
             if not all([current_df_col_item, maps_to_combo, output_name_edit]):
-                continue 
+                continue
 
             current_col = current_df_col_item.text()
             other_col_mapped = maps_to_combo.currentText()
             if other_col_mapped == "<None>":
                 other_col_mapped = None
-            
+
             output_name = output_name_edit.text().strip()
-            if not output_name: 
-                output_name = current_col 
+            if not output_name:
+                output_name = current_col
 
             mapping_config.append({
                 'include_current': include_current,
@@ -954,21 +1214,22 @@ class DataTransformer(QMainWindow):
         self.current_df = df.clone()
         self.original_df_for_reset = df.clone()
         self.df_name_hint = df_name_hint or "Untitled Data"
-        
+
         if log_file_path_from_source:
             self.current_log_file_path = log_file_path_from_source
             logger.set_log_file(self.current_log_file_path, "DataTransformer (Continuing Session)", associated_data_file=self.df_name_hint)
-        
+
         self.setWindowTitle(f"Data Transformer - [{os.path.basename(self.df_name_hint)}]")
         self.undo_stack.clear()
         self.redo_stack.clear()
-        self.applied_expressions_history.clear() # Clear for new primary DF
+        self.applied_expressions_history.clear()
+        self.current_preview_page = 0
         self._update_ui_for_data_state()
         self.update_preview_table()
         self.update_df_info_label()
-        self._update_all_column_lists()
-        self._update_applied_expressions_log() 
-        
+        self._update_all_column_lists() # This will now also update merge key table
+        self._update_applied_expressions_log()
+
         logger.log_action("DataTransformer", "Primary Data Loaded/Received",
                           f"Data '{os.path.basename(self.df_name_hint)}' set as current.",
                           details={"Source": "Source App" if self.source_app else "Direct Load/Receive",
@@ -978,12 +1239,66 @@ class DataTransformer(QMainWindow):
 
     def update_preview_table(self):
         if self.current_df is not None and not self.current_df.is_empty():
-            df_for_preview = self.current_df.slice(0, self.MAX_PREVIEW_ROWS)
-            model = PolarsModel(df_for_preview) 
+            total_rows = self.current_df.height
+            self.total_preview_pages = (total_rows + self.MAX_PREVIEW_ROWS - 1) // self.MAX_PREVIEW_ROWS
+            if self.total_preview_pages == 0: self.total_preview_pages = 1
+
+            self.current_preview_page = max(0, min(self.current_preview_page, self.total_preview_pages - 1))
+
+            start_row = self.current_preview_page * self.MAX_PREVIEW_ROWS
+            df_for_preview = self.current_df.slice(start_row, self.MAX_PREVIEW_ROWS)
+
+            model = PolarsModel(df_for_preview)
             self.preview_table.setModel(model)
+            self.preview_table.resizeColumnsToContents()
+
+            base_name = os.path.basename(self.df_name_hint or "Current Data")
+            try:
+                fm = self.preview_df_title_label.fontMetrics()
+                available_width = self.preview_table.viewport().width() if self.preview_table.viewport() else 400
+                elided_name = fm.elidedText(base_name, Qt.ElideRight, max(100, available_width - 20))
+                self.preview_df_title_label.setText(f"<b>Preview: {elided_name}</b>")
+            except Exception:
+                 self.preview_df_title_label.setText(f"<b>Preview: {base_name[:50]}{'...' if len(base_name) > 50 else ''}</b>")
+
+            self.page_info_label.setText(f"Page {self.current_preview_page + 1}/{self.total_preview_pages}")
+
         else:
             self.preview_table.setModel(None)
-        self.preview_table.resizeColumnsToContents()
+            self.preview_df_title_label.setText("<b>Preview: No Data</b>")
+            self.page_info_label.setText("Page 0/0")
+            self.total_preview_pages = 0
+            self.current_preview_page = 0
+
+        self._update_preview_nav_buttons_state()
+
+    def _update_preview_nav_buttons_state(self):
+        has_data = self.current_df is not None and not self.current_df.is_empty()
+        self.first_page_button.setEnabled(has_data and self.current_preview_page > 0)
+        self.prev_page_button.setEnabled(has_data and self.current_preview_page > 0)
+        self.next_page_button.setEnabled(has_data and self.current_preview_page < self.total_preview_pages - 1)
+        self.last_page_button.setEnabled(has_data and self.current_preview_page < self.total_preview_pages - 1)
+
+
+    def _handle_first_page_preview(self):
+        if self.current_preview_page > 0:
+            self.current_preview_page = 0
+            self.update_preview_table()
+
+    def _handle_prev_page_preview(self):
+        if self.current_preview_page > 0:
+            self.current_preview_page -= 1
+            self.update_preview_table()
+
+    def _handle_next_page_preview(self):
+        if self.current_preview_page < self.total_preview_pages - 1:
+            self.current_preview_page += 1
+            self.update_preview_table()
+
+    def _handle_last_page_preview(self):
+        if self.current_preview_page < self.total_preview_pages - 1:
+            self.current_preview_page = self.total_preview_pages - 1
+            self.update_preview_table()
 
 
     def update_df_info_label(self):
@@ -992,7 +1307,7 @@ class DataTransformer(QMainWindow):
             self.df_info_label.setText(f"Current Data: {os.path.basename(self.df_name_hint)} | Dimensions: {dims}")
         else:
             self.df_info_label.setText(f"Current Data: {os.path.basename(self.df_name_hint)} | Dimensions: N/A")
-            
+
         if self.other_df_for_combine is not None:
             dims_other = f"{self.other_df_for_combine.height}R x {self.other_df_for_combine.width}C"
             self.other_df_info_label.setText(f"Other DF: {os.path.basename(self.other_df_name_hint)} | {dims_other}")
@@ -1004,92 +1319,130 @@ class DataTransformer(QMainWindow):
         has_other_data = self.other_df_for_combine is not None and not self.other_df_for_combine.is_empty()
 
         self.save_action.setEnabled(has_current_data)
+        self.save_expressions_action.setEnabled(bool(self.applied_expressions_history))
         self.describe_df_action.setEnabled(has_current_data)
         self.reset_action.setEnabled(has_current_data and len(self.undo_stack) > 0)
         self.send_to_source_action.setEnabled(has_current_data and self.source_app is not None)
-        
+
         self.undo_action.setEnabled(len(self.undo_stack) > 0)
         self.redo_action.setEnabled(len(self.redo_stack) > 0)
 
         self.apply_expression_button.setEnabled(has_current_data)
         if hasattr(self, 'delete_fields_button'): self.delete_fields_button.setEnabled(has_current_data)
+
         self.apply_pivot_button.setEnabled(has_current_data)
         self.apply_melt_button.setEnabled(has_current_data)
-        
+
+        last_op_type = self.undo_stack[-1]["operation_type"] if self.undo_stack else None
+        if hasattr(self, 'revert_pivot_button'):
+            self.revert_pivot_button.setEnabled(last_op_type == "pivot")
+        if hasattr(self, 'revert_melt_button'):
+            self.revert_melt_button.setEnabled(last_op_type == "melt")
+
         self.apply_merge_button.setEnabled(has_current_data and has_other_data)
+        if hasattr(self, 'add_merge_key_button'): self.add_merge_key_button.setEnabled(has_current_data and has_other_data)
+        if hasattr(self, 'remove_merge_key_button'): self.remove_merge_key_button.setEnabled(has_current_data and has_other_data)
+        if hasattr(self, 'merge_key_mapping_table'): self.merge_key_mapping_table.setEnabled(has_current_data and has_other_data)
+
+
         self.apply_concat_button.setEnabled(has_current_data and has_other_data)
-        
+
         self.other_df_cast_selected_button.setEnabled(has_other_data)
         self.other_df_suggest_types_button.setEnabled(has_other_data)
-        
-        if hasattr(self, 'refresh_mapping_button'): 
+
+        if hasattr(self, 'refresh_mapping_button'):
             self.refresh_mapping_button.setEnabled(has_current_data and has_other_data)
 
 
         if not has_current_data:
             self._clear_checkbox_list_widget(self.available_cols_list_create)
-            self._clear_checkbox_list_widget(self.pivot_index_cols_list)
+            if hasattr(self, 'pivot_index_cols_list'): self._clear_checkbox_list_widget(self.pivot_index_cols_list)
             if hasattr(self, 'pivot_columns_col_combo'): self.pivot_columns_col_combo.clear()
             if hasattr(self, 'pivot_values_col_combo'): self.pivot_values_col_combo.clear()
-            self._clear_checkbox_list_widget(self.melt_id_vars_list)
-            self._clear_checkbox_list_widget(self.melt_value_vars_list)
-            self._clear_checkbox_list_widget(self.merge_left_keys_list)
+            if hasattr(self, 'melt_id_vars_list'): self._clear_checkbox_list_widget(self.melt_id_vars_list)
+            if hasattr(self, 'melt_value_vars_list'): self._clear_checkbox_list_widget(self.melt_value_vars_list)
+            if hasattr(self, 'merge_key_mapping_table'): self.merge_key_mapping_table.setRowCount(0)
             if hasattr(self, 'concat_column_mapping_table'): self.concat_column_mapping_table.setRowCount(0)
-        
+
         if not has_other_data:
-            self._clear_checkbox_list_widget(self.other_df_cols_list)
-            self._clear_checkbox_list_widget(self.merge_right_on_list)
+            if hasattr(self, 'other_df_cols_list'): self._clear_checkbox_list_widget(self.other_df_cols_list)
+            # When other_df is not available, merge key table should also be cleared or reflect this
+            if hasattr(self, 'merge_key_mapping_table'): self._populate_merge_key_mapping_table() # This will clear if other_df is None
             if hasattr(self, 'concat_column_mapping_table'): self.concat_column_mapping_table.setRowCount(0)
-        
-        if hasattr(self, 'concat_type_combo'): 
+
+        if hasattr(self, 'concat_type_combo'):
             self._on_concat_type_changed()
+        if hasattr(self, 'merge_how_combo'):
+            self._on_merge_how_changed()
 
 
-    def _update_all_column_lists(self):
+        self._update_preview_nav_buttons_state()
+
+
+    def _update_all_column_lists(self): # This method is called when data changes
         self._populate_checkbox_list_widget(self.available_cols_list_create, self.current_df)
-        
-        self._populate_checkbox_list_widget(self.pivot_index_cols_list, self.current_df)
-        self._populate_qcombobox(self.pivot_columns_col_combo, self.current_df, include_none=False) 
-        self._populate_qcombobox(self.pivot_values_col_combo, self.current_df, include_none=False) 
-        
-        self._populate_checkbox_list_widget(self.melt_id_vars_list, self.current_df)
-        self._populate_checkbox_list_widget(self.melt_value_vars_list, self.current_df)
 
-        self._populate_checkbox_list_widget(self.merge_left_keys_list, self.current_df)
-        
-        self._populate_checkbox_list_widget(self.other_df_cols_list, self.other_df_for_combine)
-        self._populate_checkbox_list_widget(self.merge_right_on_list, self.other_df_for_combine)
-        
-        if hasattr(self, 'mapping_group_concat') and self.mapping_group_concat.isVisible(): 
+        if hasattr(self, 'pivot_index_cols_list'): self._populate_checkbox_list_widget(self.pivot_index_cols_list, self.current_df)
+        if hasattr(self, 'pivot_columns_col_combo'): self._populate_qcombobox(self.pivot_columns_col_combo, self.current_df, include_none=False)
+        if hasattr(self, 'pivot_values_col_combo'): self._populate_qcombobox(self.pivot_values_col_combo, self.current_df, include_none=False)
+
+        if hasattr(self, 'melt_id_vars_list'): self._populate_checkbox_list_widget(self.melt_id_vars_list, self.current_df)
+        if hasattr(self, 'melt_value_vars_list'): self._populate_checkbox_list_widget(self.melt_value_vars_list, self.current_df)
+
+        # For Merge Tab - Update Key Mapping Table
+        if hasattr(self, 'merge_key_mapping_table'):
+            self._populate_merge_key_mapping_table()
+
+        if hasattr(self, 'other_df_cols_list'): self._populate_checkbox_list_widget(self.other_df_cols_list, self.other_df_for_combine)
+        # merge_right_on_list is removed, handled by merge_key_mapping_table
+
+        if hasattr(self, 'mapping_group_concat') and self.mapping_group_concat.isVisible():
              self._populate_concat_column_mapping_table()
 
+        self._update_pivot_diagram()
+        self._update_melt_diagram()
+
     def _create_checkbox_list_widget(self):
-        list_widget = QListWidget()
-        list_widget.setSelectionMode(QAbstractItemView.NoSelection) 
+        # list_widget = QListWidget() # Old line
+        list_widget = ShiftClickCheckboxListWidget() # New line
+        list_widget.setSelectionMode(QAbstractItemView.NoSelection)
         return list_widget
 
-    def _populate_checkbox_list_widget(self, list_widget: QListWidget, df: pl.DataFrame = None, check_all=False):
-        if not list_widget: return # Guard if called before UI fully ready
+    def _populate_checkbox_list_widget(self, list_widget: ShiftClickCheckboxListWidget, df: pl.DataFrame = None, check_all=False): # Hint type for clarity
+        if not list_widget: return
         list_widget.clear()
+        list_widget.anchor_index = -1 # Reset anchor when repopulating
         if df is not None and not df.is_empty():
             for col_name, dtype in df.schema.items():
-                item = QListWidgetItem(list_widget) # Create item first
+                item = QListWidgetItem(list_widget)
                 checkbox = QCheckBox(f"{col_name} ({dtype})")
                 checkbox.setChecked(check_all)
-                # list_widget.addItem(item) # This might be problematic if item itself isn't directly added
-                list_widget.setItemWidget(item, checkbox) # Set the widget for the item
-    
-    def _clear_checkbox_list_widget(self, list_widget: QListWidget):
-        if list_widget: 
-            list_widget.clear()
 
+                # --- New Connection ---
+                if isinstance(list_widget, ShiftClickCheckboxListWidget):
+                    checkbox.stateChanged.connect(list_widget.handle_checkbox_state_changed)
+                # --- End New Connection ---
+
+                # Keep existing connections for diagram updates if relevant
+                if list_widget == getattr(self, 'pivot_index_cols_list', None):
+                    checkbox.stateChanged.connect(self._update_pivot_diagram)
+                elif list_widget == getattr(self, 'melt_id_vars_list', None):
+                    checkbox.stateChanged.connect(self._update_melt_diagram)
+                elif list_widget == getattr(self, 'melt_value_vars_list', None):
+                    checkbox.stateChanged.connect(self._update_melt_diagram)
+
+                list_widget.setItemWidget(item, checkbox)
+            
+    def _clear_checkbox_list_widget(self, list_widget: QListWidget):
+        if list_widget:
+            list_widget.clear()
 
     def _get_checked_items_from_checkbox_list(self, list_widget: QListWidget, get_name_only=True):
         checked_items = []
-        if not list_widget : return checked_items # Guard
+        if not list_widget : return checked_items
         for i in range(list_widget.count()):
-            item = list_widget.item(i) # Get the QListWidgetItem
-            widget = list_widget.itemWidget(item) # Get the widget (QCheckBox) associated with the item
+            item = list_widget.item(i)
+            widget = list_widget.itemWidget(item)
             if isinstance(widget, QCheckBox) and widget.isChecked():
                 text = widget.text()
                 if get_name_only:
@@ -1098,41 +1451,43 @@ class DataTransformer(QMainWindow):
                     checked_items.append(text)
         return checked_items
 
+    def _populate_qcombobox(self, combo_box: QComboBox, df: pl.DataFrame = None, include_none=True, placeholder=None):
+        current_text = combo_box.currentText()
 
-    def _populate_qcombobox(self, combo_box: QComboBox, df: pl.DataFrame = None, include_none=True):
-        current_text = combo_box.currentText() 
-        
         combo_box.blockSignals(True)
         combo_box.clear()
         items = []
-        if include_none:
-            items.append("None")
+        if placeholder: # Use specific placeholder if provided
+            items.append(placeholder)
+        elif include_none and placeholder is None : # Default "None" placeholder
+             items.append("None")
+
+
         if df is not None and not df.is_empty():
             items.extend(df.columns)
         combo_box.addItems(items)
-        
+
         idx = combo_box.findText(current_text)
         if idx != -1:
             combo_box.setCurrentIndex(idx)
-        elif not include_none and combo_box.count() > 0 : 
-             combo_box.setCurrentIndex(0)
-        elif include_none and "None" in items: 
+        elif placeholder and placeholder in items:
+            combo_box.setCurrentIndex(combo_box.findText(placeholder))
+        elif include_none and "None" in items and placeholder is None:
              combo_box.setCurrentIndex(combo_box.findText("None"))
-        elif combo_box.count() > 0: 
+        elif combo_box.count() > 0:
             combo_box.setCurrentIndex(0)
+
 
         combo_box.blockSignals(False)
 
 
     def _get_selected_items_from_qlistwidget(self, list_widget: QListWidget, get_name_only=True):
-        # This is now primarily for QListWidgets that DON'T use checkboxes for selection
-        # The checkbox lists will use _get_checked_items_from_checkbox_list
         selected = []
-        if not list_widget : return selected # Guard
+        if not list_widget : return selected
         for item in list_widget.selectedItems():
             text = item.text()
             if get_name_only:
-                selected.append(text.split(" (")[0]) 
+                selected.append(text.split(" (")[0])
             else:
                 selected.append(text)
         return selected
@@ -1149,16 +1504,17 @@ class DataTransformer(QMainWindow):
         file_name, _ = QFileDialog.getOpenFileName(self, "Open Primary Data File", initial_path, file_dialog_filter)
 
         if file_name:
-            self.df_name_hint = file_name 
+            self.df_name_hint = file_name
             base_name = re.sub(r'\W+', '_', os.path.splitext(os.path.basename(self.df_name_hint))[0])
             timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
-            self.current_log_file_path = os.path.join(os.path.dirname(file_name), f".__log__{base_name}_{timestamp_str}_dt.md")
+            log_dir = os.path.dirname(file_name) if os.path.isdir(os.path.dirname(file_name)) else os.getcwd()
+            self.current_log_file_path = os.path.join(log_dir, f".__log__{base_name}_{timestamp_str}_dt.md")
             logger.set_log_file(self.current_log_file_path, "DataTransformer", associated_data_file=self.df_name_hint)
-            
+
             sheet_name = None
             if file_name.lower().endswith(('.xlsx', '.xlsm', '.xlsb', '.xls')):
                 try:
-                    from main import get_sheet_names 
+                    from main import get_sheet_names
                     sheet_names_list = get_sheet_names(file_name)
                     if len(sheet_names_list) > 1:
                         sheet_name_selected, ok = QInputDialog.getItem(self, "Select Sheet", "Choose a sheet:", sheet_names_list, 0, False)
@@ -1168,21 +1524,20 @@ class DataTransformer(QMainWindow):
                 except Exception as e:
                     self._show_error_message("Sheet Selection Error", f"Could not get sheet names: {e}")
                     return
-            
+
             self.status_bar.showMessage(f"Loading primary data: {os.path.basename(file_name)}...")
             if hasattr(self, 'primary_file_loader_thread'):
                 try:
                     self.primary_file_loader_thread.finished_signal.disconnect(self._handle_primary_df_loaded)
                     self.primary_file_loader_thread.error_signal.disconnect(self._handle_primary_df_load_error)
-                except RuntimeError: pass 
-            
+                except RuntimeError: pass
+
             self.primary_file_loader_thread = AsyncFileLoaderThreadDT(file_name, sheet_name, parent_gui=self)
             self.primary_file_loader_thread.finished_signal.connect(self._handle_primary_df_loaded)
             self.primary_file_loader_thread.error_signal.connect(self._handle_primary_df_load_error)
             self.primary_file_loader_thread.request_npz_array_selection.connect(self._handle_prompt_npz_array_selection_primary)
             self.primary_file_loader_thread.request_pickle_item_selection.connect(self._handle_prompt_pickle_item_selection_primary)
             self.primary_file_loader_thread.start()
-
 
     def _handle_primary_df_loaded(self, df, file_info):
         self.status_bar.showMessage(f"Primary data '{os.path.basename(file_info.get('filename', self.df_name_hint))}' loaded.", 3000)
@@ -1191,14 +1546,13 @@ class DataTransformer(QMainWindow):
             logger.log_action("DataTransformer", "File Load Error (Primary)", f"Failed to load or file empty: {file_info.get('filename', 'N/A')}", details=file_info)
             return
 
-        self.receive_dataframe(df, file_info.get('filename', self.df_name_hint)) 
+        self.receive_dataframe(df, file_info.get('filename', self.df_name_hint))
         logger.log_action("DataTransformer", "File Load Success (Primary)",
                           f"Details for loaded primary file: {os.path.basename(file_info.get('filename', 'N/A'))}",
                           details=file_info)
         if hasattr(self, 'primary_file_loader_thread'):
             self.primary_file_loader_thread.quit()
             self.primary_file_loader_thread.wait()
-
 
     def _handle_primary_df_load_error(self, error_message):
         self.status_bar.showMessage(f"Error loading primary data: {error_message}", 5000)
@@ -1208,16 +1562,15 @@ class DataTransformer(QMainWindow):
             self.primary_file_loader_thread.quit()
             self.primary_file_loader_thread.wait()
 
-
     def _handle_save_file(self):
         if self.current_df is None:
             self._show_error_message("Save Error", "No data to save.")
-            return
-        
+            return False # Indicate save was not successful / not attempted
+
         original_name = os.path.splitext(os.path.basename(self.df_name_hint if self.df_name_hint else "transformed_data"))[0]
         suggested_name = f"{original_name}_transformed.csv"
-        
-        file_name_to_save, selected_filter = QFileDialog.getSaveFileName(self, "Save Transformed Data As", suggested_name, 
+
+        file_name_to_save, selected_filter = QFileDialog.getSaveFileName(self, "Save Transformed Data As", suggested_name,
                                                                          "CSV Files (*.csv);;Excel Files (*.xlsx);;Parquet Files (*.parquet)")
         if file_name_to_save:
             try:
@@ -1236,15 +1589,42 @@ class DataTransformer(QMainWindow):
                     df_to_save.write_parquet(file_name_to_save)
                 else:
                     self._show_error_message("Save Error", "Unsupported file extension. Please choose .csv, .xlsx, or .parquet.")
-                    return
+                    return False # Save failed
 
                 self.status_bar.showMessage(f"Data saved successfully to {os.path.basename(file_name_to_save)}.", 5000)
                 logger.log_dataframe_save("DataTransformer", file_name_to_save,
                                           rows=df_to_save.height, cols=df_to_save.width,
                                           source_data_name=os.path.basename(self.df_name_hint))
+                return True # Save successful
             except Exception as e:
                 self._show_error_message("Save Error", f"Could not save file: {e}")
                 logger.log_action("DataTransformer", "File Save Error", f"Error saving to {os.path.basename(file_name_to_save)}", details={"Error": str(e)})
+                return False # Save failed
+        return False # User cancelled dialog
+
+
+    def _handle_save_applied_expressions(self):
+        if not self.applied_expressions_history:
+            self._show_error_message("Save Expressions Error", "No applied expressions to save.")
+            return
+
+        original_name = os.path.splitext(os.path.basename(self.df_name_hint if self.df_name_hint else "data_expressions"))[0]
+        suggested_name = f"{original_name}_expressions.json"
+
+        file_name_to_save, _ = QFileDialog.getSaveFileName(self, "Save Applied Expressions As", suggested_name, "JSON Files (*.json)")
+
+        if file_name_to_save:
+            try:
+                with open(file_name_to_save, 'w') as f:
+                    json.dump(self.applied_expressions_history, f, indent=4)
+                self.status_bar.showMessage(f"Applied expressions saved to {os.path.basename(file_name_to_save)}.", 5000)
+                logger.log_action("DataTransformer", "Applied Expressions Saved",
+                                  f"Expressions saved to {os.path.basename(file_name_to_save)}.",
+                                  details={"File Path": file_name_to_save, "Number of Expressions": len(self.applied_expressions_history)})
+            except Exception as e:
+                self._show_error_message("Save Expressions Error", f"Could not save expressions file: {e}")
+                logger.log_action("DataTransformer", "Save Expressions Error", "Error saving expressions.", details={"Error": str(e)})
+
 
     def _handle_describe_df(self):
         if self.current_df is None or self.current_df.is_empty():
@@ -1252,26 +1632,24 @@ class DataTransformer(QMainWindow):
             return
         try:
             description_df = self.current_df.describe()
-            
+
             html_output = "<h3>DataFrame Description:</h3>"
             try:
-                # Try to use to_html first
                 html_output += description_df.to_html(notebook=False, max_rows=-1)
-            except AttributeError: # Fallback for older Polars or if to_html fails
+            except AttributeError:
                 html_output += f"<pre>{str(description_df)}</pre>"
-            except Exception as e_html: # Catch other potential errors with to_html
+            except Exception as e_html:
                 html_output += f"<p>Error generating HTML table for describe: {e_html}</p><pre>{str(description_df)}</pre>"
-
 
             desc_dialog = QDialog(self)
             desc_dialog.setWindowTitle(f"Description of '{os.path.basename(self.df_name_hint)}'")
-            desc_dialog.setMinimumSize(700, 500) # Increased size
+            desc_dialog.setMinimumSize(700, 500)
             layout = QVBoxLayout(desc_dialog)
-            
+
             text_browser = QTextBrowser()
             text_browser.setHtml(html_output)
             layout.addWidget(text_browser)
-            
+
             button_box = QDialogButtonBox(QDialogButtonBox.Ok)
             button_box.accepted.connect(desc_dialog.accept)
             layout.addWidget(button_box)
@@ -1280,54 +1658,80 @@ class DataTransformer(QMainWindow):
         except Exception as e:
             self._show_error_message("Describe Error", f"Could not describe DataFrame: {e}")
 
-
-    def _push_to_undo_stack(self):
+    def _push_to_undo_stack(self, operation_description="Unknown operation", operation_type="generic"):
         if self.current_df is not None:
-            self.undo_stack.append(self.current_df.clone())
+            self.undo_stack.append({
+                "df": self.current_df.clone(),
+                "operation_description": operation_description,
+                "operation_type": operation_type,
+                "applied_expressions_history": self.applied_expressions_history.copy()
+            })
             self.redo_stack.clear()
             self._update_ui_for_data_state()
 
     def _handle_undo(self):
         if self.undo_stack:
+            current_state_to_redo = {
+                "df": self.current_df.clone(),
+                "operation_description": self.undo_stack[-1]["operation_description"],
+                "operation_type": self.undo_stack[-1]["operation_type"],
+                "applied_expressions_history": self.applied_expressions_history.copy()
+            }
+            self.redo_stack.append(current_state_to_redo)
+
+            last_state = self.undo_stack.pop()
             df_shape_before_undo = self.current_df.shape if self.current_df is not None else None
-            self.redo_stack.append(self.current_df.clone())
-            self.current_df = self.undo_stack.pop()
+
+            self.current_df = last_state["df"]
+            self.applied_expressions_history = last_state["applied_expressions_history"]
+
+            self._update_applied_expressions_log()
             self.update_preview_table()
             self.update_df_info_label()
             self._update_all_column_lists()
             self._update_ui_for_data_state()
-            # After undo, the expression history might be out of sync.
-            # For simplicity, we'll clear it. A more complex system would track expressions per undo state.
-            self.applied_expressions_history.clear() 
-            self._update_applied_expressions_log()
-            self.status_bar.showMessage("Undo successful.", 2000)
-            logger.log_action("DataTransformer", "Undo Operation", "Reverted to previous data state.",
-                              df_shape_before=df_shape_before_undo, df_shape_after=self.current_df.shape)
-
+            self.status_bar.showMessage(f"Undo: {current_state_to_redo['operation_description']}", 2000)
+            logger.log_action("DataTransformer", "Undo Operation",
+                              f"Reverted: {current_state_to_redo['operation_description']}",
+                              df_shape_before=df_shape_before_undo, df_shape_after=self.current_df.shape,
+                              details={"operation_type": current_state_to_redo["operation_type"]})
 
     def _handle_redo(self):
         if self.redo_stack:
+            current_state_to_undo = {
+                "df": self.current_df.clone(),
+                "operation_description": self.redo_stack[-1]["operation_description"],
+                "operation_type": self.redo_stack[-1]["operation_type"],
+                "applied_expressions_history": self.applied_expressions_history.copy()
+            }
+            self.undo_stack.append(current_state_to_undo)
+
+            next_state = self.redo_stack.pop()
             df_shape_before_redo = self.current_df.shape if self.current_df is not None else None
-            self.undo_stack.append(self.current_df.clone())
-            self.current_df = self.redo_stack.pop()
+
+            self.current_df = next_state["df"]
+            self.applied_expressions_history = next_state["applied_expressions_history"]
+
+            self._update_applied_expressions_log()
             self.update_preview_table()
             self.update_df_info_label()
             self._update_all_column_lists()
             self._update_ui_for_data_state()
-            # Redoing also means expression history might change. For simplicity, clear.
-            self.applied_expressions_history.clear() 
-            self._update_applied_expressions_log() # This will be empty. A more robust way is needed.
-            self.status_bar.showMessage("Redo successful.", 2000)
-            logger.log_action("DataTransformer", "Redo Operation", "Re-applied next data state.",
-                              df_shape_before=df_shape_before_redo, df_shape_after=self.current_df.shape)
+            self.status_bar.showMessage(f"Redo: {next_state['operation_description']}", 2000)
+            logger.log_action("DataTransformer", "Redo Operation",
+                              f"Re-applied: {next_state['operation_description']}.",
+                              df_shape_before=df_shape_before_redo, df_shape_after=self.current_df.shape,
+                              details={"operation_type": next_state["operation_type"]})
 
     def _handle_reset_transformations(self):
         if self.original_df_for_reset is not None:
             if self._confirm_action("Reset Transformations", "Are you sure you want to discard all changes and revert to the original data?"):
-                self._push_to_undo_stack() 
+                self._push_to_undo_stack(operation_description="Reset All Transformations", operation_type="reset")
+
                 df_shape_before_reset = self.current_df.shape
                 self.current_df = self.original_df_for_reset.clone()
                 self.applied_expressions_history.clear()
+
                 self._update_applied_expressions_log()
                 self.update_preview_table()
                 self.update_df_info_label()
@@ -1337,11 +1741,10 @@ class DataTransformer(QMainWindow):
                 logger.log_action("DataTransformer", "Reset Transformations", "All changes reverted to original loaded data.",
                                   df_shape_before=df_shape_before_reset, df_shape_after=self.current_df.shape)
 
-
     def _handle_send_to_source(self):
         if self.source_app and hasattr(self.source_app, "load_dataframe_from_source") and self.current_df is not None:
             new_name_hint = f"{os.path.splitext(os.path.basename(self.df_name_hint))[0]}_transformed"
-            
+
             try:
                 self.source_app.load_dataframe_from_source(self.current_df.clone(), new_name_hint, self.current_log_file_path)
                 self.status_bar.showMessage(f"Data sent to {self.source_app.windowTitle()}.", 3000)
@@ -1351,7 +1754,7 @@ class DataTransformer(QMainWindow):
                                            "Data Hint": new_name_hint, "Shape": self.current_df.shape,
                                            "Log File Passed": self.current_log_file_path})
             except AttributeError:
-                 if hasattr(self.source_app, "receive_dataframe"): 
+                 if hasattr(self.source_app, "receive_dataframe"):
                     self.source_app.receive_dataframe(self.current_df.clone(), new_name_hint, log_file_path_from_source=self.current_log_file_path)
                     self.status_bar.showMessage(f"Data sent to {self.source_app.windowTitle()}.", 3000)
                     logger.log_action("DataTransformer", "Data Sent to Source",
@@ -1369,7 +1772,6 @@ class DataTransformer(QMainWindow):
         elif self.current_df is None:
             self._show_error_message("Send Error", "No data to send.")
 
-
     def _handle_apply_expression(self):
         if self.current_df is None: return
         field_name = self.new_field_name_edit.text().strip()
@@ -1378,30 +1780,30 @@ class DataTransformer(QMainWindow):
         if not field_name or not expression_str:
             self._show_error_message("Input Error", "Field name and expression cannot be empty.")
             return
-        
+
         if field_name in self.current_df.columns:
             if not self._confirm_action("Overwrite Column?", f"Column '{field_name}' already exists. Overwrite it?"):
                 return
 
         df_shape_before = self.current_df.shape
-        self._push_to_undo_stack()
+        self._push_to_undo_stack(operation_description=f"Applied expression to '{field_name}'", operation_type="expression")
         try:
             eval_context = {"pl": pl}
             eval_context.update({col: pl.col(col) for col in self.current_df.columns})
-            
+
             polars_expr_obj = eval(expression_str, eval_context)
-            
+
             self.current_df = self.current_df.with_columns(
                 polars_expr_obj.alias(field_name)
             )
-            
-            self.applied_expressions_history[field_name] = expression_str 
-            self._update_applied_expressions_log()
 
+            self.applied_expressions_history[field_name] = expression_str
+            self._update_applied_expressions_log()
 
             self.update_preview_table()
             self.update_df_info_label()
             self._update_all_column_lists()
+            self._update_ui_for_data_state()
             self.status_bar.showMessage(f"Expression applied to field '{field_name}'.", 2000)
             logger.log_action("DataTransformer", "Create/Modify Field",
                               f"Expression applied to '{field_name}'.",
@@ -1409,10 +1811,17 @@ class DataTransformer(QMainWindow):
                               df_shape_before=df_shape_before, df_shape_after=self.current_df.shape)
         except Exception as e:
             self._show_error_message("Expression Error", f"Error applying expression: {e}\n\n{traceback.format_exc()}")
-            if self.undo_stack: 
-                 self.current_df = self.undo_stack.pop() 
-                 self.redo_stack.clear() 
-                 self._update_ui_for_data_state()
+            if self.undo_stack:
+                failed_op_undo_state = self.undo_stack.pop()
+                self.current_df = failed_op_undo_state["df"]
+                self.applied_expressions_history = failed_op_undo_state["applied_expressions_history"]
+                self.redo_stack.clear()
+                self._update_ui_for_data_state()
+                self._update_applied_expressions_log()
+                self.update_preview_table()
+                self.update_df_info_label()
+                self._update_all_column_lists()
+
             logger.log_action("DataTransformer", "Create/Modify Field Error",
                               f"Error for field '{field_name}'.",
                               details={"Field": field_name, "Expression": expression_str, "Error": str(e)})
@@ -1421,7 +1830,7 @@ class DataTransformer(QMainWindow):
         if self.current_df is None or self.current_df.is_empty():
             self._show_error_message("Delete Error", "No data loaded to delete columns from.")
             return
-        
+
         selected_cols_to_delete = self._get_checked_items_from_checkbox_list(self.available_cols_list_create, get_name_only=True)
 
         if not selected_cols_to_delete:
@@ -1432,19 +1841,19 @@ class DataTransformer(QMainWindow):
             return
 
         df_shape_before = self.current_df.shape
-        self._push_to_undo_stack()
+        self._push_to_undo_stack(operation_description=f"Deleted columns: {', '.join(selected_cols_to_delete)}", operation_type="delete_columns")
         try:
             self.current_df = self.current_df.drop(selected_cols_to_delete)
-            
+
             for col_name in selected_cols_to_delete:
                 if col_name in self.applied_expressions_history:
                     del self.applied_expressions_history[col_name]
             self._update_applied_expressions_log()
 
-
             self.update_preview_table()
             self.update_df_info_label()
             self._update_all_column_lists()
+            self._update_ui_for_data_state()
             self.status_bar.showMessage(f"Columns deleted: {', '.join(selected_cols_to_delete)}.", 2000)
             logger.log_action("DataTransformer", "Delete Fields",
                               f"Deleted columns: {', '.join(selected_cols_to_delete)}.",
@@ -1452,42 +1861,114 @@ class DataTransformer(QMainWindow):
                               df_shape_before=df_shape_before, df_shape_after=self.current_df.shape)
         except Exception as e:
             self._show_error_message("Delete Error", f"Error deleting columns: {e}\n\n{traceback.format_exc()}")
-            if self.undo_stack: self.current_df = self.undo_stack.pop(); self.redo_stack.clear(); self._update_ui_for_data_state()
+            if self.undo_stack:
+                failed_op_undo_state = self.undo_stack.pop()
+                self.current_df = failed_op_undo_state["df"]
+                self.applied_expressions_history = failed_op_undo_state["applied_expressions_history"]
+                self.redo_stack.clear()
+                self._update_ui_for_data_state()
+                self._update_applied_expressions_log()
+                self.update_preview_table()
             logger.log_action("DataTransformer", "Delete Fields Error", "Error during column deletion.", details={"Error": str(e)})
 
     def _update_applied_expressions_log(self):
-        self.applied_expressions_log_table.setRowCount(0) 
-        
-        # To show latest at bottom, iterate through history keys
-        # (Python dicts maintain insertion order from 3.7+)
+        self.applied_expressions_log_table.setRowCount(0)
         for field_name, expression in self.applied_expressions_history.items():
             row_position = self.applied_expressions_log_table.rowCount()
             self.applied_expressions_log_table.insertRow(row_position)
-            
+
             self.applied_expressions_log_table.setItem(row_position, 0, QTableWidgetItem(field_name))
             self.applied_expressions_log_table.setItem(row_position, 1, QTableWidgetItem(expression))
-            
+
             use_btn = QPushButton("Use")
-            use_btn.setFixedSize(40,22) # Small button
+            use_btn.setFixedSize(40,22)
             use_btn.clicked.connect(lambda checked=False, fn=field_name, expr=expression: self._populate_expression_fields_from_log(fn, expr))
             self.applied_expressions_log_table.setCellWidget(row_position, 2, use_btn)
         self.applied_expressions_log_table.scrollToBottom()
+        if hasattr(self, 'save_expressions_action'):
+             self.save_expressions_action.setEnabled(bool(self.applied_expressions_history))
 
 
     def _populate_expression_fields_from_log(self, field_name, expression):
         self.new_field_name_edit.setText(field_name)
         self.polars_expression_edit.setPlainText(expression)
 
+    def _update_pivot_diagram(self):
+        if not hasattr(self, 'pivot_diagram_label'): return
+
+        index_cols = self._get_checked_items_from_checkbox_list(self.pivot_index_cols_list)
+        columns_col = self.pivot_columns_col_combo.currentText()
+        values_col = self.pivot_values_col_combo.currentText()
+
+        if not index_cols and (columns_col == "None" or not columns_col) and (values_col == "None" or not values_col) :
+            self.pivot_diagram_label.setText("<i>Diagram: Select options to see transformation preview.</i>")
+            self.pivot_diagram_label.setStyleSheet("font-style: italic; color: gray; margin-top: 5px; border: 1px dashed #ccc; padding: 5px;")
+            return
+
+        index_str = ", ".join([f"<b>{c}</b>" for c in index_cols]) if index_cols else "<i>(none)</i>"
+        columns_str = f"<b>{columns_col}</b>" if columns_col and columns_col != "None" else "<i>(select)</i>"
+        values_str = f"<b>{values_col}</b>" if values_col and values_col != "None" else "<i>(select)</i>"
+
+        diagram_html = f"""
+        <p style="text-align:center; margin:0; padding:0;">
+            Original Rows based on (Index): {index_str}<br>
+            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&#8627; <span style="font-size:1.2em;">Values from {values_str} will populate cells</span><br>
+            New Columns derived from unique values in: {columns_str}
+        </p>
+        <p style="text-align:center; font-size:smaller; color:DimGray; margin:0;padding:0;">
+            (Each unique combination of Index values forms a row. Each unique value from 'Columns' field forms a new column header.)
+        </p>
+        """
+        self.pivot_diagram_label.setText(diagram_html)
+        self.pivot_diagram_label.setStyleSheet("font-style: normal; color: black; margin-top: 5px; border: 1px solid #aaa; padding: 8px; background-color: #f9f9f9;")
+
+
+    def _update_melt_diagram(self):
+        if not hasattr(self, 'melt_diagram_label'): return
+
+        id_vars = self._get_checked_items_from_checkbox_list(self.melt_id_vars_list)
+        value_vars = self._get_checked_items_from_checkbox_list(self.melt_value_vars_list)
+        variable_name = self.melt_variable_name_edit.text().strip() or "variable"
+        value_name = self.melt_value_name_edit.text().strip() or "value"
+
+        if not id_vars and not value_vars and variable_name == "variable" and value_name == "value":
+            self.melt_diagram_label.setText("<i>Diagram: Select options to see transformation preview.</i>")
+            self.melt_diagram_label.setStyleSheet("font-style: italic; color: gray; margin-top: 5px; border: 1px dashed #ccc; padding: 5px;")
+            return
+
+        id_vars_str = ", ".join([f"<b>{c}</b>" for c in id_vars]) if id_vars else "<i>(none kept as is)</i>"
+
+        if value_vars:
+            value_vars_str = f"Columns to melt: {', '.join([f'<b>{c}</b>' for c in value_vars])}"
+        else:
+            value_vars_str = "<i>(All non-ID columns will be melted)</i>"
+
+        variable_name_str = f"<b>{variable_name}</b>"
+        value_name_str = f"<b>{value_name}</b>"
+
+        diagram_html = f"""
+        <p style="text-align:center; margin:0; padding:0;">
+            Identifier Columns (kept): {id_vars_str}<br>
+            {value_vars_str}<br>
+            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+            &#8600; Will be stacked into two new columns: &#8601;<br>
+            New 'Variable' Column: {variable_name_str} (contains original column names)<br>
+            New 'Value' Column: {value_name_str} (contains original cell values)
+        </p>
+        """
+        self.melt_diagram_label.setText(diagram_html)
+        self.melt_diagram_label.setStyleSheet("font-style: normal; color: black; margin-top: 5px; border: 1px solid #aaa; padding: 8px; background-color: #f9f9f9;")
+
 
     def _handle_apply_pivot(self):
         if self.current_df is None: return
-        
+
         index_cols = self._get_checked_items_from_checkbox_list(self.pivot_index_cols_list)
         columns_col = self.pivot_columns_col_combo.currentText()
         values_col = self.pivot_values_col_combo.currentText()
         agg_func_str = self.pivot_agg_func_combo.currentText()
 
-        if not index_cols or columns_col == "None" or values_col == "None":
+        if not index_cols or columns_col == "None" or not columns_col or values_col == "None" or not values_col:
             self._show_error_message("Pivot Error", "Index, Columns, and Values columns must be selected.")
             return
         if columns_col in index_cols or values_col in index_cols or columns_col == values_col :
@@ -1495,36 +1976,46 @@ class DataTransformer(QMainWindow):
              return
 
         df_shape_before = self.current_df.shape
-        self._push_to_undo_stack()
+        self._push_to_undo_stack(operation_description="Applied Pivot", operation_type="pivot")
         try:
-            temp_df = self.current_df 
-            if agg_func_str not in ["first", "list", "count"]:
-                try:
-                    if temp_df.schema[values_col] not in [pl.Int64, pl.Float64, pl.Int32, pl.Float32, pl.Int16, pl.Int8, pl.UInt64, pl.UInt32, pl.UInt16, pl.UInt8]:
+            temp_df = self.current_df
+            if agg_func_str not in ["first", "last", "list", "count"]:
+                if values_col in temp_df.columns:
+                    current_dtype = temp_df.schema[values_col]
+                    if not isinstance(current_dtype, (pl.NUMERIC_DTYPES)):
                         temp_df = temp_df.with_columns(pl.col(values_col).cast(pl.Float64, strict=False))
-                except Exception as cast_e:
-                    self.status_bar.showMessage(f"Warning: Could not cast values column '{values_col}' to numeric for aggregation: {cast_e}", 4000)
-            
-            agg_func_polars = agg_func_str 
+                        self.status_bar.showMessage(f"Note: Pivot values column '{values_col}' temporarily cast to Float for aggregation.", 3000)
 
-            self.current_df = temp_df.pivot( 
+            self.current_df = temp_df.pivot(
                 index=index_cols,
                 columns=columns_col,
                 values=values_col,
-                aggregate_function=agg_func_polars
+                aggregate_function=agg_func_str
             )
             self.update_preview_table()
             self.update_df_info_label()
             self._update_all_column_lists()
+            self._update_ui_for_data_state()
             self.status_bar.showMessage("Pivot applied.", 2000)
             logger.log_action("DataTransformer", "Pivot Operation", "Data pivoted.",
                               details={"Index": index_cols, "Columns From": columns_col, "Values From": values_col, "Aggregation": agg_func_str},
                               df_shape_before=df_shape_before, df_shape_after=self.current_df.shape)
         except Exception as e:
             self._show_error_message("Pivot Error", f"Error applying pivot: {e}\n\n{traceback.format_exc()}")
-            if self.undo_stack: self.current_df = self.undo_stack.pop(); self.redo_stack.clear(); self._update_ui_for_data_state()
+            if self.undo_stack:
+                failed_op_undo_state = self.undo_stack.pop()
+                self.current_df = failed_op_undo_state["df"]
+                self.applied_expressions_history = failed_op_undo_state["applied_expressions_history"]
+                self.redo_stack.clear()
+                self._update_ui_for_data_state()
             logger.log_action("DataTransformer", "Pivot Operation Error", "Error during pivot.", details={"Error": str(e)})
 
+    def _handle_revert_last_pivot(self):
+        if self.undo_stack and self.undo_stack[-1]["operation_type"] == "pivot":
+            self._handle_undo()
+            self.status_bar.showMessage("Last pivot operation reverted.", 2000)
+        else:
+            self._show_error_message("Revert Pivot Error", "The last operation was not a pivot or no operations to undo.")
 
     def _handle_apply_melt(self):
         if self.current_df is None: return
@@ -1534,26 +2025,23 @@ class DataTransformer(QMainWindow):
         variable_name = self.melt_variable_name_edit.text().strip() or "variable"
         value_name = self.melt_value_name_edit.text().strip() or "value"
 
-        if not id_vars and not value_vars : 
+        if not id_vars and not value_vars :
             if not self._confirm_action("Melt Warning", "No ID variables and no Value variables selected. This will melt ALL columns. Are you sure?"):
                  return
-        elif not id_vars and value_vars: 
-            pass 
-        elif not id_vars: 
-            pass
-        
+
         df_shape_before = self.current_df.shape
-        self._push_to_undo_stack()
+        self._push_to_undo_stack(operation_description="Applied Melt (Unpivot)", operation_type="melt")
         try:
             self.current_df = self.current_df.melt(
-                id_vars=id_vars if id_vars else None, 
-                value_vars=value_vars if value_vars else None, 
+                id_vars=id_vars if id_vars else None,
+                value_vars=value_vars if value_vars else None,
                 variable_name=variable_name,
                 value_name=value_name
             )
             self.update_preview_table()
             self.update_df_info_label()
             self._update_all_column_lists()
+            self._update_ui_for_data_state()
             self.status_bar.showMessage("Melt applied.", 2000)
             logger.log_action("DataTransformer", "Melt Operation", "Data melted (unpivoted).",
                               details={"ID Vars": id_vars, "Value Vars": value_vars if value_vars else "All non-ID",
@@ -1561,12 +2049,25 @@ class DataTransformer(QMainWindow):
                               df_shape_before=df_shape_before, df_shape_after=self.current_df.shape)
         except Exception as e:
             self._show_error_message("Melt Error", f"Error applying melt: {e}\n\n{traceback.format_exc()}")
-            if self.undo_stack: self.current_df = self.undo_stack.pop(); self.redo_stack.clear(); self._update_ui_for_data_state()
+            if self.undo_stack:
+                failed_op_undo_state = self.undo_stack.pop()
+                self.current_df = failed_op_undo_state["df"]
+                self.applied_expressions_history = failed_op_undo_state["applied_expressions_history"]
+                self.redo_stack.clear()
+                self._update_ui_for_data_state()
             logger.log_action("DataTransformer", "Melt Operation Error", "Error during melt.", details={"Error": str(e)})
+
+    def _handle_revert_last_melt(self):
+        if self.undo_stack and self.undo_stack[-1]["operation_type"] == "melt":
+            self._handle_undo()
+            self.status_bar.showMessage("Last melt operation reverted.", 2000)
+        else:
+            self._show_error_message("Revert Melt Error", "The last operation was not a melt or no operations to undo.")
+
 
     def _handle_load_other_df(self):
         initial_path = os.path.join(os.path.expanduser('~'), 'Documents')
-        file_dialog_filter = ( 
+        file_dialog_filter = (
             "All Supported Data Files (*.csv *.xlsx *.xls *.xlsb *.xlsm *.parquet *.npz *.pkl *.pickle *.hkl *.hickle *.json *.jsonl *.ndjson *.dat *.txt);;"
             "CSV Files (*.csv);;Excel Files (*.xlsx *.xls *.xlsb *.xlsm);;Parquet Files (*.parquet);;"
             "NumPy Archives (*.npz *.npy);;Pickle Files (*.pkl *.pickle);;"
@@ -1576,8 +2077,8 @@ class DataTransformer(QMainWindow):
         file_name, _ = QFileDialog.getOpenFileName(self, "Load 'Other' DataFrame", initial_path, file_dialog_filter)
 
         if file_name:
-            self.other_df_name_hint = file_name 
-            sheet_name = None 
+            self.other_df_name_hint = file_name
+            sheet_name = None
             if file_name.lower().endswith(('.xlsx', '.xlsm', '.xlsb', '.xls')):
                 try:
                     from main import get_sheet_names
@@ -1592,7 +2093,7 @@ class DataTransformer(QMainWindow):
                     return
 
             self.other_df_progress_bar.setVisible(True)
-            self.other_df_progress_bar.setValue(0) 
+            self.other_df_progress_bar.setValue(0)
             self.status_bar.showMessage(f"Loading 'Other' DF: {os.path.basename(file_name)}...")
 
             if hasattr(self, 'other_df_loader_thread'):
@@ -1600,7 +2101,7 @@ class DataTransformer(QMainWindow):
                     self.other_df_loader_thread.finished_signal.disconnect(self._handle_other_df_loaded)
                     self.other_df_loader_thread.error_signal.disconnect(self._handle_other_df_load_error)
                 except RuntimeError: pass
-            
+
             self.other_df_loader_thread = AsyncFileLoaderThreadDT(file_name, sheet_name, parent_gui=self)
             self.other_df_loader_thread.finished_signal.connect(self._handle_other_df_loaded)
             self.other_df_loader_thread.error_signal.connect(self._handle_other_df_load_error)
@@ -1620,17 +2121,16 @@ class DataTransformer(QMainWindow):
             logger.log_action("DataTransformer", "File Load Error (Other DF)", f"Failed to load or file empty: {file_info.get('filename', 'N/A')}", details=file_info)
         else:
             self.other_df_for_combine = df
-            self.other_df_file_info = file_info 
-            logger.log_dataframe_load("DataTransformer (Other DF)", file_info.get('filename'), 
+            self.other_df_file_info = file_info
+            logger.log_dataframe_load("DataTransformer (Other DF)", file_info.get('filename'),
                                       sheet_name=file_info.get('sheet_name'),
-                                      rows=file_info.get('rows', df.height), 
+                                      rows=file_info.get('rows', df.height),
                                       cols=file_info.get('columns', df.width),
                                       load_time_sec=file_info.get('load_time', 0))
-            
+
         self.update_df_info_label()
-        self._populate_checkbox_list_widget(self.other_df_cols_list, self.other_df_for_combine) 
-        self._populate_checkbox_list_widget(self.merge_right_on_list, self.other_df_for_combine) 
-        self._update_ui_for_data_state() 
+        self._update_all_column_lists()
+        self._update_ui_for_data_state()
         if hasattr(self, 'other_df_loader_thread'):
             self.other_df_loader_thread.quit()
             self.other_df_loader_thread.wait()
@@ -1641,6 +2141,8 @@ class DataTransformer(QMainWindow):
         self._show_error_message("'Other' DF Load Error", error_message)
         self.other_df_for_combine = None
         self.other_df_file_info = {}
+        self.update_df_info_label()
+        self._update_all_column_lists()
         self._update_ui_for_data_state()
         logger.log_action("DataTransformer", "File Load Error (Other DF)", "Failed to load 'Other' data file.", details={"Error": error_message})
         if hasattr(self, 'other_df_loader_thread'):
@@ -1691,7 +2193,6 @@ class DataTransformer(QMainWindow):
         if hasattr(self.primary_file_loader_thread, 'on_pickle_item_selected_relayed'):
             self.primary_file_loader_thread.on_pickle_item_selected_relayed(selected_item_path)
 
-
     def _handle_cast_other_df_columns(self):
         if self.other_df_for_combine is None or self.other_df_for_combine.is_empty(): return
         selected_col_names = self._get_checked_items_from_checkbox_list(self.other_df_cols_list, get_name_only=True)
@@ -1717,14 +2218,13 @@ class DataTransformer(QMainWindow):
                 if target_polars_type == pl.Datetime:
                     if self.other_df_for_combine.schema[col_name] == pl.Utf8:
                         expressions.append(pl.col(col_name).str.to_datetime(strict=False, time_unit='ns', ambiguous='earliest').dt.replace_time_zone(None).alias(col_name))
-                    else: 
+                    else:
                         expressions.append(pl.col(col_name).cast(pl.Datetime, strict=False).dt.replace_time_zone(None).alias(col_name))
                 else:
                     expressions.append(pl.col(col_name).cast(target_polars_type, strict=False).alias(col_name))
-            
+
             self.other_df_for_combine = self.other_df_for_combine.with_columns(expressions)
-            self._populate_checkbox_list_widget(self.other_df_cols_list, self.other_df_for_combine) 
-            self._populate_checkbox_list_widget(self.merge_right_on_list, self.other_df_for_combine)
+            self._update_all_column_lists() # This will refresh other_df_cols_list and merge key table
             self.status_bar.showMessage(f"Selected columns in 'Other DF' cast to {target_type_str}.", 2000)
             logger.log_action("DataTransformer", "Type Cast (Other DF)",
                               f"Casted {len(selected_col_names)} cols to {target_type_str}.",
@@ -1740,60 +2240,60 @@ class DataTransformer(QMainWindow):
             self._show_error_message("Merge Error", "Both Current DF and Other DF must be loaded and not empty.")
             return
 
-        left_keys_orig = self._get_checked_items_from_checkbox_list(self.merge_left_keys_list)
-        right_keys_orig = self._get_checked_items_from_checkbox_list(self.merge_right_on_list)
-        how = self.merge_how_combo.currentText() 
-        suffix = self.merge_suffix_edit.text() # Use the single suffix field
+        how = self.merge_how_combo.currentText()
+        suffix = self.merge_suffix_edit.text()
         
-        if not left_keys_orig or not right_keys_orig:
-            if how != "cross": 
-                self._show_error_message("Merge Error", "Key(s) must be selected for both DataFrames (unless it's a cross join).")
+        left_keys, right_keys = None, None # Initialize
+        if how != "cross":
+            left_keys, right_keys = self._get_merge_key_mapping_from_table()
+            if left_keys is None: # Error occurred in getting keys
                 return
-        elif len(left_keys_orig) != len(right_keys_orig):
-            if how != "cross":
-                self._show_error_message("Merge Error", "The number of keys selected for Current DF and Other DF must match.")
+            if not left_keys: # No keys selected for a non-cross join
+                self._show_error_message("Merge Error", "At least one key pair must be selected and included for this join type.")
                 return
         
         df_shape_before = self.current_df.shape
         other_df_shape = self.other_df_for_combine.shape
-        self._push_to_undo_stack()
+        self._push_to_undo_stack(operation_description=f"Applied '{how}' Merge/Join", operation_type="merge")
 
         current_df_to_join = self.current_df.clone()
         other_df_to_join = self.other_df_for_combine.clone()
 
         try:
-            # Cast join keys to string for robustness
-            left_key_exprs = [pl.col(k).cast(pl.Utf8).alias(k) for k in left_keys_orig]
-            right_key_exprs = [pl.col(k).cast(pl.Utf8).alias(k) for k in right_keys_orig]
-
-            if left_key_exprs: # Only apply if keys are actually selected
-                current_df_to_join = current_df_to_join.with_columns(left_key_exprs)
-            if right_key_exprs:
-                other_df_to_join = other_df_to_join.with_columns(right_key_exprs)
-
-            join_args = {
-                "left_on": left_keys_orig if left_keys_orig else None,
-                "right_on": right_keys_orig if right_keys_orig else None,
-                "how": how,
-                "suffix": suffix # Polars join uses a single suffix for columns from the right DF
-            }
+            join_args = {"how": how, "suffix": suffix}
+            if how != "cross":
+                join_args["left_on"] = left_keys
+                join_args["right_on"] = right_keys
             
-            self.current_df = current_df_to_join.join(
-                other_df_to_join,
-                **join_args
-            )
+            # Key type consistency check/cast (optional, can be complex)
+            # For simplicity, we'll rely on Polars' default behavior for now.
+            # If strict type matching is desired, one could iterate through key pairs
+            # and attempt to cast to a common supertype or string before joining.
+
+            self.current_df = current_df_to_join.join(other_df_to_join, **join_args)
+
             self.update_preview_table()
             self.update_df_info_label()
             self._update_all_column_lists()
-            self.status_bar.showMessage(f"'{how.capitalize()}' merge applied.", 2000)
+            self._update_ui_for_data_state()
+            
+            log_key_details = {"Left Keys": left_keys, "Right Keys": right_keys} if how != "cross" else {"Keys": "N/A (Cross Join)"}
+            key_map_str = ", ".join([f"'{lk}' (Current) <=> '{rk}' (Other)" for lk, rk in zip(left_keys or [], right_keys or [])])
+            self.status_bar.showMessage(f"'{how.capitalize()}' merge applied. Keys: {key_map_str if key_map_str else 'N/A'}", 3000)
+
             logger.log_action("DataTransformer", "Merge/Join Operation", f"Applied '{how}' join.",
-                              details={"Left Keys": left_keys_orig, "Right Keys": right_keys_orig, "How": how, 
-                                       "Suffix (for Other DF)": suffix, 
-                                       "Other DF Shape": other_df_shape, "Other DF Name": self.other_df_name_hint},
+                              details={**log_key_details, "How": how, "Suffix (for Other DF)": suffix,
+                                       "Other DF Shape": other_df_shape, "Other DF Name": self.other_df_name_hint,
+                                       "Key Mapping": key_map_str},
                               df_shape_before=df_shape_before, df_shape_after=self.current_df.shape)
         except Exception as e:
             self._show_error_message("Merge Error", f"Error applying merge: {e}\n\n{traceback.format_exc()}")
-            if self.undo_stack: self.current_df = self.undo_stack.pop(); self.redo_stack.clear(); self._update_ui_for_data_state()
+            if self.undo_stack:
+                failed_op_undo_state = self.undo_stack.pop()
+                self.current_df = failed_op_undo_state["df"]
+                self.applied_expressions_history = failed_op_undo_state["applied_expressions_history"]
+                self.redo_stack.clear()
+                self._update_ui_for_data_state()
             logger.log_action("DataTransformer", "Merge/Join Error", "Error during merge.", details={"Error": str(e)})
 
 
@@ -1805,127 +2305,134 @@ class DataTransformer(QMainWindow):
 
         polars_how_from_ui = self.concat_type_combo.currentData()
         rechunk = self.concat_rechunk_check.isChecked()
-        
+
         if polars_how_from_ui is None:
             self._show_error_message("Concatenate Error", "Invalid concatenation type selected.")
             return
 
         current_df_to_concat = self.current_df.clone()
         other_df_to_concat = self.other_df_for_combine.clone()
-        
+
         mapping_config = self._get_concat_column_mapping_from_table()
-        processed_mapping_for_log = mapping_config # Log the user's choices
-        
+        processed_mapping_for_log = mapping_config
+
         actual_polars_how = polars_how_from_ui
 
         if polars_how_from_ui == "horizontal":
             if current_df_to_concat.height != other_df_to_concat.height:
-                if not self._confirm_action("Concat Warning", 
+                if not self._confirm_action("Concat Warning",
                                             "Horizontal concatenation: Row counts differ. Polars will fill shorter DF with nulls up to the height of the taller one. Continue?"):
                     return
-            
-            # Prepare current_df based on "Include" and "Output Name"
+
             current_df_select_exprs = []
+            other_df_select_exprs_intermediate = []
+
+            current_df_output_names = set()
+
             for row_map in mapping_config:
                 if row_map['include_current']:
                     if row_map['output_name'] != row_map['current_col']:
                         current_df_select_exprs.append(pl.col(row_map['current_col']).alias(row_map['output_name']))
                     else:
                         current_df_select_exprs.append(pl.col(row_map['current_col']))
-            
+                    current_df_output_names.add(row_map['output_name'])
+
             if current_df_select_exprs:
                 current_df_to_concat = current_df_to_concat.select(current_df_select_exprs)
-            elif mapping_config : # All current_df cols unchecked
-                current_df_to_concat = pl.DataFrame().with_height(other_df_to_concat.height if not other_df_to_concat.is_empty() else 0)
-            # If mapping_config is empty, current_df_to_concat remains original
+            elif mapping_config:
+                current_df_to_concat = pl.DataFrame().with_height(other_df_to_concat.height if not other_df_to_concat.is_empty() else current_df_to_concat.height)
 
-            # Prepare other_df based on "Maps To" and "Output Name"
-            other_df_select_exprs = []
-            # Ensure unique output names for columns from other_df, potentially adding suffix if clash with current_df's selected output names
-            current_df_final_names = [expr.meta.output_name() for expr in current_df_select_exprs]
 
+            selected_other_cols_with_aliases = {}
             for row_map in mapping_config:
                 if row_map['map_to_other'] and row_map['map_to_other'] in other_df_to_concat.columns:
                     other_col_original = row_map['map_to_other']
                     output_name_for_other = row_map['output_name']
-                    
-                    # If the intended output name for an 'other' column already exists in the selected 'current' columns,
-                    # Polars' default horizontal concat would suffix it. Here we don't pre-suffix,
-                    # we just select and alias as per user's "Output Name" for the 'other' column.
-                    # Polars will handle final suffixing if names still clash after user's explicit renaming.
-                    if output_name_for_other != other_col_original:
-                        other_df_select_exprs.append(pl.col(other_col_original).alias(output_name_for_other))
-                    else: # Output name is same as original 'other' column name
-                        # Avoid duplicate selection if this other_col_original was already processed (e.g. mapped from multiple current_df rows)
-                        if not any(expr.meta.output_name() == other_col_original for expr in other_df_select_exprs) and \
-                           not any(expr.meta.root_names() == [other_col_original] and expr.meta.output_name() == other_col_original for expr in other_df_select_exprs):
-                             other_df_select_exprs.append(pl.col(other_col_original))
-            
-            if other_df_select_exprs:
-                other_df_to_concat = other_df_to_concat.select(other_df_select_exprs)
+
+                    if other_col_original not in selected_other_cols_with_aliases or selected_other_cols_with_aliases[other_col_original] != output_name_for_other:
+                        if output_name_for_other != other_col_original:
+                             other_df_select_exprs_intermediate.append(pl.col(other_col_original).alias(output_name_for_other))
+                        else:
+                             other_df_select_exprs_intermediate.append(pl.col(other_col_original))
+                        selected_other_cols_with_aliases[other_col_original] = output_name_for_other
+
+            if other_df_select_exprs_intermediate:
+                other_df_to_concat = other_df_to_concat.select(other_df_select_exprs_intermediate)
             else:
-                other_df_to_concat = pl.DataFrame().with_height(current_df_to_concat.height if not current_df_to_concat.is_empty() else 0)
+                 other_df_to_concat = pl.DataFrame().with_height(current_df_to_concat.height if not current_df_to_concat.is_empty() else other_df_to_concat.height)
 
 
         elif polars_how_from_ui == "custom_vertical_common":
             common_cols_set = set(current_df_to_concat.columns) & set(other_df_to_concat.columns)
-            common_cols = [col for col in current_df_to_concat.columns if col in common_cols_set] 
+            common_cols = [col for col in current_df_to_concat.columns if col in common_cols_set]
             if not common_cols:
                 self._show_error_message("Concatenate Error", "No common columns found for 'Vertical Common Columns' concatenation.")
                 return
             current_df_to_concat = current_df_to_concat.select(common_cols)
-            other_df_to_concat = other_df_to_concat.select(common_cols) 
-            actual_polars_how = "vertical" 
-            processed_mapping_for_log.append({"action": "selected_common_columns_for_vertical_stack", "columns": common_cols})
+            other_df_to_concat = other_df_to_concat.select(common_cols)
+            actual_polars_how = "vertical"
+            processed_mapping_for_log = [{"action": "selected_common_columns_for_vertical_stack", "columns": common_cols}]
         else:
-            actual_polars_how = polars_how_from_ui 
-        
-        df_shape_before = self.current_df.shape 
-        other_df_original_shape = self.other_df_for_combine.shape 
-        self._push_to_undo_stack()
+            actual_polars_how = polars_how_from_ui
+
+        df_shape_before = self.current_df.shape
+        other_df_original_shape = self.other_df_for_combine.shape
+        self._push_to_undo_stack(operation_description=f"Applied Concatenation (how='{self.concat_type_combo.currentText()}')", operation_type="concat")
         try:
-            # Ensure DFs are not empty before concat, as Polars might error with empty+non-empty
             dfs_to_concat_final = []
-            if not current_df_to_concat.is_empty():
-                dfs_to_concat_final.append(current_df_to_concat)
-            if not other_df_to_concat.is_empty():
-                dfs_to_concat_final.append(other_df_to_concat)
-            
-            if not dfs_to_concat_final: # Both ended up empty
-                self.current_df = pl.DataFrame() # Result is empty
-            elif len(dfs_to_concat_final) == 1: # Only one DF has data
+            if polars_how_from_ui == "horizontal":
+                if current_df_to_concat.is_empty() and other_df_to_concat.is_empty():
+                     self.current_df = pl.DataFrame()
+                elif current_df_to_concat.is_empty():
+                     self.current_df = other_df_to_concat
+                elif other_df_to_concat.is_empty():
+                     self.current_df = current_df_to_concat
+                else:
+                    dfs_to_concat_final.append(current_df_to_concat)
+                    dfs_to_concat_final.append(other_df_to_concat)
+            else:
+                if not current_df_to_concat.is_empty():
+                    dfs_to_concat_final.append(current_df_to_concat)
+                if not other_df_to_concat.is_empty():
+                    dfs_to_concat_final.append(other_df_to_concat)
+
+            if not dfs_to_concat_final:
+                self.current_df = pl.DataFrame()
+            elif len(dfs_to_concat_final) == 1 and polars_how_from_ui != "horizontal":
                  self.current_df = dfs_to_concat_final[0]
-            else: # Both have data
+            elif dfs_to_concat_final:
                 self.current_df = pl.concat(
                     dfs_to_concat_final,
-                    how=actual_polars_how, 
+                    how=actual_polars_how,
                     rechunk=rechunk
                 )
 
             self.update_preview_table()
             self.update_df_info_label()
-            self._update_all_column_lists() 
+            self._update_all_column_lists()
+            self._update_ui_for_data_state()
             self.status_bar.showMessage(f"Concatenation (Polars how='{actual_polars_how}') applied.", 2000)
-            
+
             log_details = {"UI Choice How": self.concat_type_combo.currentText(),
-                           "Polars How Used": actual_polars_how, 
-                           "Rechunk": rechunk, 
-                           "Other DF Original Shape": other_df_original_shape, 
+                           "Polars How Used": actual_polars_how,
+                           "Rechunk": rechunk,
+                           "Other DF Original Shape": other_df_original_shape,
                            "Other DF Name": self.other_df_name_hint,
-                           "Column Mapping Config (if horizontal)": processed_mapping_for_log if polars_how_from_ui == "horizontal" else "N/A"}
-            if actual_polars_how == "vertical" and self.concat_type_combo.currentData() == "custom_vertical_common":
-                 log_details["Common Columns Used (custom_vertical_common)"] = common_cols
+                           "Column Mapping Config (if horizontal/custom)": processed_mapping_for_log}
 
-
-            logger.log_action("DataTransformer", "Concatenate Operation", 
+            logger.log_action("DataTransformer", "Concatenate Operation",
                               f"Applied concatenation. UI Choice: '{self.concat_type_combo.currentText()}', Polars How: '{actual_polars_how}'.",
                               details=log_details,
                               df_shape_before=df_shape_before, df_shape_after=self.current_df.shape)
         except Exception as e:
             self._show_error_message("Concatenate Error", f"Error applying concatenate: {e}\n\n{traceback.format_exc()}")
-            if self.undo_stack: self.current_df = self.undo_stack.pop(); self.redo_stack.clear(); self._update_ui_for_data_state()
+            if self.undo_stack:
+                failed_op_undo_state = self.undo_stack.pop()
+                self.current_df = failed_op_undo_state["df"]
+                self.applied_expressions_history = failed_op_undo_state["applied_expressions_history"]
+                self.redo_stack.clear()
+                self._update_ui_for_data_state()
             logger.log_action("DataTransformer", "Concatenate Error", "Error during concatenation.", details={"Error": str(e)})
-
 
     def _handle_suggest_types_other_df(self):
         if self.other_df_for_combine is None or self.other_df_for_combine.is_empty():
@@ -1933,87 +2440,103 @@ class DataTransformer(QMainWindow):
             return
         self._suggest_and_convert_types_for_other_df()
 
-
     def _suggest_and_convert_types_for_other_df(self):
         df_to_analyze = self.other_df_for_combine
-        if df_to_analyze is None or df_to_analyze.is_empty(): 
+        if df_to_analyze is None or df_to_analyze.is_empty():
+            QMessageBox.information(self, "No Data (Other DF)", "No 'Other DataFrame' loaded or it's empty to analyze for conversions.")
             return
 
         self.other_df_progress_bar.setVisible(True)
-        self.other_df_progress_bar.setRange(0,100) 
+        self.other_df_progress_bar.setRange(0, 100)
         self.other_df_progress_bar.setValue(0)
-        self.status_bar.showMessage("Analyzing 'Other DF' for type conversions...", 0) 
+        self.status_bar.showMessage("Analyzing 'Other DF' columns for potential type conversions...")
         QApplication.processEvents()
 
-        suggested_conversions = [] 
-        MAX_UNIQUE_CATEGORICAL_ABS = 50 
-        MAX_UNIQUE_CATEGORICAL_REL = 0.1 
+        suggested_conversions = []
+        MAX_UNIQUE_CATEGORICAL_ABS = 50
+        MAX_UNIQUE_CATEGORICAL_REL = 0.1
+        BOOLEAN_TRUE_STRINGS = {"True", "true", "yes", "Yes", "1", "t"}
+        BOOLEAN_FALSE_STRINGS = {"False", "false", "no", "No", "0", "f"}
 
-        columns_to_analyze = [col for col in df_to_analyze.columns if col != "__original_index__"]
+        columns_to_process = [l for l in df_to_analyze.columns if l != "__original_index__"]
+        num_cols_to_process = len(columns_to_process)
 
-        for i, col_name in enumerate(columns_to_analyze):
-            progress_val = int(((i + 1) / len(columns_to_analyze)) * 50) if columns_to_analyze else 0
-            self.other_df_progress_bar.setValue(progress_val)
-            self.status_bar.showMessage(f"Analyzing (Other DF): {col_name} ({i+1}/{len(columns_to_analyze)})")
+        for col_idx, col_name in enumerate(columns_to_process):
+            progress_percentage = int(((col_idx + 1) / (num_cols_to_process or 1)) * 50)
+            self.other_df_progress_bar.setValue(progress_percentage)
+            self.status_bar.showMessage(f"Analyzing (Other DF): {col_name} ({col_idx + 1}/{num_cols_to_process})")
             QApplication.processEvents()
-            
+
             series = df_to_analyze.get_column(col_name)
             non_null_series = series.drop_nulls()
-            
-            current_suggestion = "string_key" 
+
+            current_suggestion = "string_key"
 
             if non_null_series.is_empty():
-                suggested_conversions.append((col_name, current_suggestion)) 
+                suggested_conversions.append((col_name, current_suggestion))
                 continue
 
-            if series.dtype in [pl.Int8, pl.Int16, pl.Int32, pl.Int64, pl.UInt8, pl.UInt16, pl.UInt32, pl.UInt64]:
+            if series.dtype in pl.INTEGER_DTYPES:
                 current_suggestion = "integer"
-            elif series.dtype in [pl.Float32, pl.Float64]:
+            elif series.dtype in pl.FLOAT_DTYPES:
                 current_suggestion = "numeric_float"
             elif series.dtype == pl.Categorical:
-                current_suggestion = "category" 
-            elif series.dtype in [pl.Date, pl.Datetime]:
+                current_suggestion = "category"
+            elif series.dtype in [pl.Date, pl.Datetime, pl.Time, pl.Duration]:
                 current_suggestion = "datetime"
-            elif series.dtype == pl.Boolean: 
-                current_suggestion = "category" 
-            
+            elif series.dtype == pl.Boolean:
+                current_suggestion = "boolean"
+
             elif series.dtype == pl.Utf8:
                 try:
                     sample_size_dt = min(1000, non_null_series.len())
                     if sample_size_dt > 0:
-                        datetime_cast_sample_null_ratio = non_null_series.head(sample_size_dt).str.to_datetime(
+                        casted_dt_sample = non_null_series.head(sample_size_dt).str.to_datetime(
                             strict=False, time_unit='us', ambiguous='earliest', format=None
-                        ).is_null().sum() / sample_size_dt
-
-                        if datetime_cast_sample_null_ratio <= 0.1:
-                            casted_dt = non_null_series.str.to_datetime(strict=False, time_unit='us', ambiguous='earliest', format=None)
-                            if casted_dt.null_count() / non_null_series.len() <= 0.05: 
+                        )
+                        if casted_dt_sample.null_count() / sample_size_dt <= 0.1:
+                            casted_dt_full = non_null_series.str.to_datetime(
+                                strict=False, time_unit='us', ambiguous='earliest', format=None
+                            )
+                            if casted_dt_full.null_count() / non_null_series.len() <= 0.05:
                                 current_suggestion = "datetime"
-                except Exception: pass
+                except Exception:
+                    pass
 
-                if current_suggestion == "string_key": 
+                if current_suggestion == "string_key":
+                    sample_for_bool_check = non_null_series.head(min(non_null_series.len(), 5000))
+                    unique_lower_strings = {s.lower() for s in sample_for_bool_check.unique().to_list() if s is not None and isinstance(s, str)}
+                    if unique_lower_strings and unique_lower_strings.issubset(BOOLEAN_TRUE_STRINGS.union(BOOLEAN_FALSE_STRINGS)):
+                        if len(unique_lower_strings) < 10 or non_null_series.n_unique() < MAX_UNIQUE_CATEGORICAL_ABS :
+                            full_unique_lower_strings = {s.lower() for s in non_null_series.unique().to_list() if s is not None and isinstance(s, str)}
+                            if full_unique_lower_strings and full_unique_lower_strings.issubset(BOOLEAN_TRUE_STRINGS.union(BOOLEAN_FALSE_STRINGS)):
+                                current_suggestion = "boolean"
+
+                if current_suggestion == "string_key":
                     try:
-                        _ = non_null_series.cast(pl.Int64, strict=True) 
+                        _ = non_null_series.cast(pl.Int64, strict=True)
                         current_suggestion = "integer"
-                    except pl.PolarsError: 
+                    except pl.PolarsError:
                         try:
                             casted_float_for_int_check = non_null_series.cast(pl.Float64, strict=False)
-                            original_string_non_null_count = non_null_series.len() 
-                            if not casted_float_for_int_check.is_null().all() and \
-                               (casted_float_for_int_check.drop_nulls() % 1 == 0).all():
-                                if casted_float_for_int_check.null_count() <= original_string_non_null_count * 0.05 :
-                                    current_suggestion = "integer"
-                            elif current_suggestion == "string_key": 
-                                if casted_float_for_int_check.null_count() <= original_string_non_null_count * 0.05:
-                                    current_suggestion = "numeric_float"
-                        except Exception: pass
+                            non_null_casted_float = casted_float_for_int_check.drop_nulls()
 
-                if current_suggestion == "string_key": 
+                            if not non_null_casted_float.is_empty() and \
+                               (non_null_casted_float.fill_null(0.1) % 1 == 0).all():
+                                if casted_float_for_int_check.null_count() / non_null_series.len() <= 0.05:
+                                    current_suggestion = "integer"
+                            elif current_suggestion == "string_key":
+                                if casted_float_for_int_check.null_count() / non_null_series.len() <= 0.05:
+                                    current_suggestion = "numeric_float"
+                        except Exception:
+                            pass
+
+                if current_suggestion == "string_key":
                     n_unique = non_null_series.n_unique()
                     if n_unique <= MAX_UNIQUE_CATEGORICAL_ABS or \
                        (non_null_series.len() > 0 and (n_unique / non_null_series.len()) <= MAX_UNIQUE_CATEGORICAL_REL):
                         current_suggestion = "category"
-            
+
             suggested_conversions.append((col_name, current_suggestion))
 
         self.other_df_progress_bar.setValue(50)
@@ -2026,7 +2549,7 @@ class DataTransformer(QMainWindow):
             QMessageBox.information(self, "No Suggestions (Other DF)", "No columns available for conversion suggestions in 'Other DF'.")
             return
 
-        dialog = QDialog(self) 
+        dialog = QDialog(self)
         dialog.setWindowTitle("Suggested Type Conversions for 'Other DataFrame'")
         dialog_layout = QVBoxLayout(dialog)
 
@@ -2034,187 +2557,209 @@ class DataTransformer(QMainWindow):
         header_layout.addWidget(QLabel("<b>Column Name</b>"), 2)
         header_layout.addWidget(QLabel("<b>String/Key</b>"), 1, alignment=Qt.AlignCenter)
         header_layout.addWidget(QLabel("<b>Category</b>"), 1, alignment=Qt.AlignCenter)
-        header_layout.addWidget(QLabel("<b>Numeric (Float)</b>"), 1, alignment=Qt.AlignCenter)
+        header_layout.addWidget(QLabel("<b>Boolean</b>"), 1, alignment=Qt.AlignCenter)
         header_layout.addWidget(QLabel("<b>Integer</b>"), 1, alignment=Qt.AlignCenter)
+        header_layout.addWidget(QLabel("<b>Numeric (Float)</b>"), 1, alignment=Qt.AlignCenter)
         header_layout.addWidget(QLabel("<b>Datetime</b>"), 1, alignment=Qt.AlignCenter)
         dialog_layout.addLayout(header_layout)
 
         scroll_area = QScrollArea()
         scroll_widget = QWidget()
         grid_layout = QGridLayout(scroll_widget)
-        grid_layout.setColumnStretch(0, 2) 
-        for i in range(1, 6): grid_layout.setColumnStretch(i, 1)
+        grid_layout.setColumnStretch(0, 2)
+        for i in range(1, 7): grid_layout.setColumnStretch(i, 1)
 
-        self.other_df_conversion_radio_button_groups.clear() 
+        self.other_df_conversion_radio_button_groups.clear()
 
         for row_idx, (col_name, suggested_type) in enumerate(suggested_conversions):
             col_name_label = QLabel(col_name)
-            string_rb = QRadioButton(); category_rb = QRadioButton()
-            float_rb = QRadioButton(); integer_rb = QRadioButton()
-            datetime_rb = QRadioButton()
+            string_rb = QRadioButton(); category_rb = QRadioButton(); boolean_rb = QRadioButton()
+            integer_rb = QRadioButton(); float_rb = QRadioButton(); datetime_rb = QRadioButton()
 
-            button_group = QButtonGroup(dialog) 
-            button_group.addButton(string_rb); button_group.addButton(category_rb)
-            button_group.addButton(float_rb); button_group.addButton(integer_rb)
-            button_group.addButton(datetime_rb)
+            button_group = QButtonGroup(dialog)
+            button_group.addButton(string_rb); button_group.addButton(category_rb); button_group.addButton(boolean_rb)
+            button_group.addButton(integer_rb); button_group.addButton(float_rb); button_group.addButton(datetime_rb)
 
             if suggested_type == "string_key": string_rb.setChecked(True)
             elif suggested_type == "category": category_rb.setChecked(True)
-            elif suggested_type == "numeric_float": float_rb.setChecked(True)
+            elif suggested_type == "boolean": boolean_rb.setChecked(True)
             elif suggested_type == "integer": integer_rb.setChecked(True)
+            elif suggested_type == "numeric_float": float_rb.setChecked(True)
             elif suggested_type == "datetime": datetime_rb.setChecked(True)
-            else: string_rb.setChecked(True) 
+            else: string_rb.setChecked(True)
 
             grid_layout.addWidget(col_name_label, row_idx, 0)
             grid_layout.addWidget(string_rb, row_idx, 1, alignment=Qt.AlignCenter)
             grid_layout.addWidget(category_rb, row_idx, 2, alignment=Qt.AlignCenter)
-            grid_layout.addWidget(float_rb, row_idx, 3, alignment=Qt.AlignCenter)
+            grid_layout.addWidget(boolean_rb, row_idx, 3, alignment=Qt.AlignCenter)
             grid_layout.addWidget(integer_rb, row_idx, 4, alignment=Qt.AlignCenter)
-            grid_layout.addWidget(datetime_rb, row_idx, 5, alignment=Qt.AlignCenter)
+            grid_layout.addWidget(float_rb, row_idx, 5, alignment=Qt.AlignCenter)
+            grid_layout.addWidget(datetime_rb, row_idx, 6, alignment=Qt.AlignCenter)
 
             self.other_df_conversion_radio_button_groups.append(
-                (col_name_label, string_rb, category_rb, float_rb, integer_rb, datetime_rb)
+                (col_name_label, string_rb, category_rb, boolean_rb, integer_rb, float_rb, datetime_rb)
             )
-        
+
         scroll_widget.setLayout(grid_layout)
         scroll_area.setWidget(scroll_widget)
         scroll_area.setWidgetResizable(True)
         dialog_layout.addWidget(scroll_area)
 
-        button_box_layout = QHBoxLayout() 
+        button_box_layout = QHBoxLayout()
         help_button = QPushButton("?")
         help_button.setFixedSize(25, 25)
         help_button.setToolTip("Help on Data Types")
-        help_button.clicked.connect(self._show_type_conversion_help_for_other_df) 
-        
+        help_button.clicked.connect(self._show_type_conversion_help_for_other_df)
+
         dialog_buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         dialog_buttons.accepted.connect(dialog.accept)
         dialog_buttons.rejected.connect(dialog.reject)
 
         button_box_layout.addWidget(help_button)
-        button_box_layout.addStretch() 
+        button_box_layout.addStretch()
         button_box_layout.addWidget(dialog_buttons)
-        dialog_layout.addLayout(button_box_layout) 
+        dialog_layout.addLayout(button_box_layout)
 
-        dialog.setMinimumWidth(700) 
+        dialog.setMinimumWidth(750)
         dialog.setMinimumHeight(400)
 
         if dialog.exec() == QDialog.Accepted:
-            cols_to_float, cols_to_int, cols_to_datetime, cols_to_category, cols_to_string = [], [], [], [], []
+            cols_to_float, cols_to_int, cols_to_datetime, cols_to_category, cols_to_string, cols_to_boolean = [], [], [], [], [], []
 
-            for col_label, str_rb, cat_rb, flt_rb, int_rb, dt_rb in self.other_df_conversion_radio_button_groups:
+            for col_label, str_rb, cat_rb, bool_rb, int_rb, flt_rb, dt_rb in self.other_df_conversion_radio_button_groups:
                 col_name_to_convert = col_label.text()
                 if col_name_to_convert not in self.other_df_for_combine.columns:
                     continue
                 current_col_dtype = self.other_df_for_combine.schema[col_name_to_convert]
 
-
-                if flt_rb.isChecked() and current_col_dtype not in [pl.Float32, pl.Float64]:
+                if flt_rb.isChecked() and not isinstance(current_col_dtype, pl.FLOAT_DTYPES):
                     cols_to_float.append(col_name_to_convert)
-                elif int_rb.isChecked() and current_col_dtype not in [pl.Int8,pl.Int16,pl.Int32,pl.Int64,pl.UInt8,pl.UInt16,pl.UInt32,pl.UInt64]:
+                elif int_rb.isChecked() and not isinstance(current_col_dtype, pl.INTEGER_DTYPES):
                     cols_to_int.append(col_name_to_convert)
-                elif dt_rb.isChecked() and current_col_dtype not in [pl.Date, pl.Datetime]:
+                elif dt_rb.isChecked() and not isinstance(current_col_dtype, (pl.Date, pl.Datetime, pl.Time, pl.Duration)):
                     cols_to_datetime.append(col_name_to_convert)
                 elif cat_rb.isChecked() and current_col_dtype != pl.Categorical:
                     cols_to_category.append(col_name_to_convert)
-                elif str_rb.isChecked() and current_col_dtype != pl.Utf8: 
+                elif bool_rb.isChecked() and current_col_dtype != pl.Boolean:
+                    cols_to_boolean.append(col_name_to_convert)
+                elif str_rb.isChecked() and current_col_dtype != pl.Utf8:
                     cols_to_string.append(col_name_to_convert)
-            
+
             any_conversion_done = False
-            if cols_to_float:
-                self._temp_cols_for_batch_other_df = cols_to_float
-                self._batch_convert_columns_for_other_df("numeric_float", target_polars_type=pl.Float64)
-                any_conversion_done = True
-            if cols_to_int:
-                self._temp_cols_for_batch_other_df = cols_to_int
-                self._batch_convert_columns_for_other_df("integer", target_polars_type=pl.Int64)
+            if cols_to_boolean:
+                self._temp_cols_for_batch_other_df = cols_to_boolean
+                self._batch_convert_columns_for_other_df("boolean", target_polars_type=pl.Boolean)
                 any_conversion_done = True
             if cols_to_datetime:
                 self._temp_cols_for_batch_other_df = cols_to_datetime
                 self._batch_convert_columns_for_other_df("datetime", target_polars_type=pl.Datetime)
                 any_conversion_done = True
+            if cols_to_int:
+                self._temp_cols_for_batch_other_df = cols_to_int
+                self._batch_convert_columns_for_other_df("integer", target_polars_type=pl.Int64)
+                any_conversion_done = True
+            if cols_to_float:
+                self._temp_cols_for_batch_other_df = cols_to_float
+                self._batch_convert_columns_for_other_df("numeric_float", target_polars_type=pl.Float64)
+                any_conversion_done = True
             if cols_to_category:
                 self._temp_cols_for_batch_other_df = cols_to_category
                 self._batch_convert_columns_for_other_df("categorical", target_polars_type=pl.Categorical)
                 any_conversion_done = True
-            if cols_to_string: 
+            if cols_to_string:
                 self._temp_cols_for_batch_other_df = cols_to_string
                 self._batch_convert_columns_for_other_df("string_key", target_polars_type=pl.Utf8)
                 any_conversion_done = True
-            
+
             if any_conversion_done:
                 self.status_bar.showMessage("Selected type conversions applied to 'Other DF'.", 3000)
             else:
-                self.status_bar.showMessage("No changes made to 'Other DF' data types.", 3000)
+                self.status_bar.showMessage("No changes made to 'Other DF' data types based on selection.", 3000)
             self.other_df_progress_bar.setValue(100)
 
-        else: 
+        else:
             self.status_bar.showMessage("Conversion suggestions for 'Other DF' cancelled.", 3000)
-            self.other_df_progress_bar.setValue(100) 
-        
-        QTimer.singleShot(500, lambda: self.other_df_progress_bar.setVisible(False))
-        self.other_df_conversion_radio_button_groups.clear() 
+            self.other_df_progress_bar.setValue(100)
 
+        QTimer.singleShot(500, lambda: self.other_df_progress_bar.setVisible(False))
+        self.other_df_conversion_radio_button_groups.clear()
+        self._update_all_column_lists()
 
     def _batch_convert_columns_for_other_df(self, type_name, target_polars_type=None):
         if self.other_df_for_combine is None or self.other_df_for_combine.is_empty():
             self._show_error_message("Batch Conversion Error (Other DF)", "No 'Other DataFrame' loaded or it's empty.")
             return
-        
-        selected_names = self._temp_cols_for_batch_other_df 
+
+        selected_names = self._temp_cols_for_batch_other_df
         if not selected_names:
             return
 
         num_selected = len(selected_names)
-        
-        self.other_df_progress_bar.setVisible(True)
-        self.other_df_progress_bar.setValue(50) 
-        
+
+        self.other_df_progress_bar.setVisible(True) # Ensure visible during batch application
+        self.other_df_progress_bar.setValue(50) # Assuming analysis was 50%, now application phase
+
         converted_count = 0
         skipped_details = []
         error_details = []
         user_cancelled_all = False
         yes_to_all_warnings = False
-        
+
         df_shape_before_batch_op = self.other_df_for_combine.shape
+        actual_target_polars_type = target_polars_type
+
+        expressions_to_apply = []
+        BOOLEAN_TRUE_STRINGS_LOWER = {s.lower() for s in {"True", "true", "yes", "Yes", "1", "t"}}
+
 
         for i, col_name in enumerate(selected_names):
-            current_progress = 50 + int(((i + 0.5) / num_selected) * 50)
+            current_progress = 50 + int(((i + 0.5) / num_selected) * 50) # Second half of progress
             self.other_df_progress_bar.setValue(current_progress)
-            self.status_bar.showMessage(f"Converting (Other DF) {i+1}/{num_selected}: '{col_name}' to {type_name}...")
+            self.status_bar.showMessage(f"Preparing conversion (Other DF) {i+1}/{num_selected}: '{col_name}' to {type_name}...")
             QApplication.processEvents()
 
+            if col_name not in self.other_df_for_combine.columns:
+                error_details.append(f"'{col_name}': Column not found in 'Other DataFrame'.")
+                continue
+
+            original_column_series = self.other_df_for_combine.get_column(col_name)
+            original_nulls = original_column_series.is_null().sum()
+            current_col_schema_dtype = self.other_df_for_combine.schema[col_name]
+
+            conversion_expr = None
+
+            if type_name == "numeric_float":
+                conversion_expr = pl.col(col_name).cast(pl.Float64, strict=False)
+                actual_target_polars_type = pl.Float64
+            elif type_name == "integer":
+                conversion_expr = pl.col(col_name).cast(pl.Int64, strict=False)
+                actual_target_polars_type = pl.Int64
+            elif type_name == "datetime":
+                if current_col_schema_dtype == pl.Utf8:
+                    conversion_expr = pl.col(col_name).str.to_datetime(strict=False, time_unit='ns', ambiguous='earliest').dt.replace_time_zone(None)
+                else:
+                    conversion_expr = pl.col(col_name).cast(pl.Datetime, strict=False).dt.replace_time_zone(None)
+                actual_target_polars_type = pl.Datetime
+            elif type_name == "categorical":
+                conversion_expr = pl.col(col_name).cast(pl.Categorical, strict=False)
+                actual_target_polars_type = pl.Categorical
+            elif type_name == "boolean":
+                if current_col_schema_dtype == pl.Utf8: # If original is string, map known strings
+                    conversion_expr = pl.when(pl.col(col_name).str.to_lowercase().is_in(BOOLEAN_TRUE_STRINGS_LOWER)).then(pl.lit(True, dtype=pl.Boolean)) \
+                                     .otherwise(pl.lit(False, dtype=pl.Boolean)) # Could also be null if not in false set either
+                else: # For non-string, direct cast
+                    conversion_expr = pl.col(col_name).cast(pl.Boolean, strict=False)
+                actual_target_polars_type = pl.Boolean
+            elif type_name == "string_key":
+                conversion_expr = pl.col(col_name).cast(pl.Utf8)
+                actual_target_polars_type = pl.Utf8
+
+            if conversion_expr is None:
+                error_details.append(f"'{col_name}': No conversion logic for type '{type_name}'.")
+                continue
+
             try:
-                if col_name not in self.other_df_for_combine.columns:
-                    error_details.append(f"'{col_name}': Column not found in 'Other DataFrame'.")
-                    continue
-
-                original_column_series = self.other_df_for_combine.get_column(col_name)
-                original_nulls = original_column_series.is_null().sum()
-                current_col_schema_dtype = self.other_df_for_combine.schema[col_name]
-
-                final_conversion_expr = None
-                actual_target_polars_type = target_polars_type 
-
-                if type_name == "numeric_float":
-                    final_conversion_expr = pl.col(col_name).cast(pl.Float64, strict=False)
-                elif type_name == "integer":
-                    final_conversion_expr = pl.col(col_name).cast(pl.Int64, strict=False)
-                elif type_name == "datetime":
-                    if current_col_schema_dtype == pl.Utf8:
-                        final_conversion_expr = pl.col(col_name).str.to_datetime(strict=False, time_unit='ns', ambiguous='earliest').dt.replace_time_zone(None)
-                    else:
-                        final_conversion_expr = pl.col(col_name).cast(pl.Datetime, strict=False).dt.replace_time_zone(None)
-                elif type_name == "categorical":
-                    final_conversion_expr = pl.col(col_name).cast(pl.Categorical, strict=False)
-                elif type_name == "string_key":
-                    final_conversion_expr = pl.col(col_name).cast(pl.Utf8)
-                
-                if final_conversion_expr is None:
-                    error_details.append(f"'{col_name}': No conversion logic for type '{type_name}'.")
-                    continue
-                
-                temp_converted_series = self.other_df_for_combine.select(final_conversion_expr.alias("___temp_batch_check___")).get_column("___temp_batch_check___")
+                temp_converted_series = self.other_df_for_combine.select(conversion_expr.alias("___temp_batch_check___")).get_column("___temp_batch_check___")
                 converted_nulls = temp_converted_series.is_null().sum()
                 newly_created_nulls = converted_nulls - original_nulls
 
@@ -2224,72 +2769,94 @@ class DataTransformer(QMainWindow):
                     significant_new_nans = True
                 elif newly_created_nulls > 0.05 * self.other_df_for_combine.height:
                     significant_new_nans = True
-                if type_name == "string_key": significant_new_nans = False
+
+                if type_name == "string_key" or type_name == "boolean": # Less likely to create unwanted nulls
+                    significant_new_nans = False
 
                 if significant_new_nans and not yes_to_all_warnings:
                     msg_box = QMessageBox(self); msg_box.setIcon(QMessageBox.Warning)
                     msg_box.setWindowTitle(f"Conversion Warning for '{col_name}' (Other DF)")
-                    msg_box.setText(f"Converting '{col_name}' to {type_name} resulted in {newly_created_nulls} new empty/null values. Proceed with this column?")
+                    msg_box.setText(f"Converting '{col_name}' to {type_name} may result in {newly_created_nulls} new empty/null values. Proceed with this column?")
                     yes_button = msg_box.addButton("Yes", QMessageBox.YesRole); no_button = msg_box.addButton("No", QMessageBox.NoRole)
                     yes_all_button = msg_box.addButton("Yes to All", QMessageBox.AcceptRole); cancel_all_button = msg_box.addButton("Cancel All", QMessageBox.RejectRole)
                     msg_box.setDefaultButton(yes_button); msg_box.exec()
-                    
+
                     clicked_btn = msg_box.clickedButton()
-                    if clicked_btn == no_button: 
+                    if clicked_btn == no_button:
                         skipped_details.append(f"'{col_name}': Skipped by user due to new nulls."); continue
-                    elif clicked_btn == cancel_all_button: 
+                    elif clicked_btn == cancel_all_button:
                         user_cancelled_all = True; skipped_details.append(f"'{col_name}': Batch cancelled by user."); break
-                    elif clicked_btn == yes_all_button: 
+                    elif clicked_btn == yes_all_button:
                         yes_to_all_warnings = True
 
-                self.other_df_for_combine = self.other_df_for_combine.with_columns(final_conversion_expr.alias(col_name))
-                converted_count += 1
-            except Exception as e: 
-                error_details.append(f"'{col_name}': {str(e)}")
-                print(f"Error converting (Other DF) {col_name} to {type_name}: {e}\n{traceback.format_exc()}")
+                expressions_to_apply.append(conversion_expr.alias(col_name))
+                # converted_count will be len(expressions_to_apply) at the end if no batch error
+
+            except Exception as e_check:
+                error_details.append(f"'{col_name}' (check phase): {str(e_check)}")
+                print(f"Error checking conversion (Other DF) {col_name} to {type_name}: {e_check}\n{traceback.format_exc()}")
+                continue
+
+        if user_cancelled_all:
+            self.status_bar.showMessage(f"Batch conversion for 'Other DF' to '{type_name}' cancelled by user.", 3000)
+            converted_count = len(expressions_to_apply) # Count those prepared before cancellation
+        elif expressions_to_apply:
+            try:
+                self.status_bar.showMessage(f"Applying batch conversion for {len(expressions_to_apply)} columns in 'Other DF'...", 0)
+                QApplication.processEvents()
+                self.other_df_for_combine = self.other_df_for_combine.with_columns(expressions_to_apply)
+                converted_count = len(expressions_to_apply) # Successfully prepared and attempted
+                self.status_bar.showMessage(f"Batch conversion for 'Other DF' applied.", 3000)
+            except Exception as e_batch:
+                self._show_error_message("Batch Conversion Error (Other DF)", f"Error applying batched conversions: {e_batch}")
+                error_details.append(f"Batch Apply Phase: {str(e_batch)}")
+                logger.log_action("DataTransformer", "Batch Type Conversion Error (Other DF)", "Error during batch application.", details={"Error": str(e_batch)})
+                # converted_count remains as those prepared, but apply failed.
+        else: # No expressions to apply (all skipped or errors in prep)
+            converted_count = 0
+
 
         self.other_df_progress_bar.setValue(100)
-        self.status_bar.showMessage(f"Batch conversion for 'Other DF' processing...", 2000)
-        QApplication.processEvents()
+        QTimer.singleShot(200, lambda: self.other_df_progress_bar.setVisible(False))
 
-        self._populate_checkbox_list_widget(self.other_df_cols_list, self.other_df_for_combine)
-        self._populate_checkbox_list_widget(self.merge_right_on_list, self.other_df_for_combine)
-        
-        summary_parts = [f"{converted_count} of {num_selected} columns in 'Other DF' processed for conversion to '{type_name}'." if not user_cancelled_all else f"Batch conversion for 'Other DF' to '{type_name}' cancelled. {converted_count} processed."]
+        self._update_all_column_lists() # Refresh lists
+
+        summary_parts = [f"{converted_count} of {num_selected} columns in 'Other DF' processed for conversion to '{type_name}'." if not user_cancelled_all else f"Batch conversion for 'Other DF' to '{type_name}' cancelled. {converted_count} processed before cancel or error."]
         if skipped_details: summary_parts.append("\nSkipped:\n" + "\n".join(skipped_details))
         if error_details: summary_parts.append("\nErrors:\n" + "\n".join(error_details))
-        
-        if skipped_details or error_details or (converted_count < num_selected and not user_cancelled_all) :
+
+        if skipped_details or error_details or (converted_count < num_selected and not user_cancelled_all and num_selected > 0) :
             QMessageBox.information(self, "Batch Conversion Summary (Other DF)", "\n".join(summary_parts))
-        
-        self.status_bar.showMessage(f"Batch {type_name} conversion for 'Other DF' finished.", 3000)
-        
-        logger.log_action("DataTransformer", "Batch Type Conversion (Other DF)", 
+
+        logger.log_action("DataTransformer", "Batch Type Conversion (Other DF)",
                           f"Attempted to convert {num_selected} columns in '{self.other_df_name_hint}' to {type_name}.",
-                          details={"Columns Selected": selected_names, 
+                          details={"Columns Selected": selected_names,
                                    "Target Type Name": type_name,
                                    "Target Polars Type": str(actual_target_polars_type),
-                                   "Converted Count": converted_count,
-                                   "Skipped": skipped_details, "Errors": error_details,
+                                   "Converted Count": converted_count, # Number of expressions actually run by with_columns
+                                   "Skipped Count": len(skipped_details),
+                                   "Error Count": len(error_details),
                                    "DF Name": self.other_df_name_hint},
                           df_shape_before=df_shape_before_batch_op,
-                          df_shape_after=self.other_df_for_combine.shape)
-        
-        self._temp_cols_for_batch_other_df = [] 
+                          df_shape_after=self.other_df_for_combine.shape if self.other_df_for_combine is not None else "N/A")
+
+        self._temp_cols_for_batch_other_df = []
+
 
     def _show_type_conversion_help_for_other_df(self):
         help_text = """
         <html><head><style> body { font-family: sans-serif; font-size: 10pt; } h3 { color: #333; } p { margin-bottom: 8px; } ul { margin-top: 0px; padding-left: 20px; } li { margin-bottom: 4px; } code { background-color: #f0f0f0; padding: 1px 3px; border-radius: 3px; font-family: monospace;} </style></head><body>
         <h3>Understanding Data Types for Conversion:</h3>
-        <p><b>String/Key:</b><ul><li>Text data (words, codes, non-math numbers like IDs).</li></ul></p>
-        <p><b>Category:</b><ul><li>Text/numbers for distinct groups from a limited set (e.g., Gender, Country Code). Good for few unique values.</li></ul></p>
-        <p><b>Numeric (Float):</b><ul><li>Numbers with decimals for measurements, amounts, calculations.</li></ul></p>
-        <p><b>Integer (Whole Number):</b><ul><li>Whole numbers for counts or quantities.</li></ul></p>
-        <p><b>Datetime:</b><ul><li>Specific dates and/or times. Allows date-based calculations.</li></ul></p>
-        <p><i>Choosing the right type helps with analysis and memory. Suggestions are based on data appearance.</i></p>
+        <p><b>String/Key:</b><ul><li>Text data (words, codes, non-math numbers like IDs). Polars: <code>Utf8</code>.</li></ul></p>
+        <p><b>Category:</b><ul><li>Text/numbers for distinct groups from a limited set (e.g., Gender, Country Code). Good for few unique values, can save memory. Polars: <code>Categorical</code>.</li></ul></p>
+        <p><b>Boolean:</b><ul><li>Represents true/false states. Strings like "true", "yes", "1" (and their negative counterparts) will be attempted to convert. Polars: <code>Boolean</code>.</li></ul></p>
+        <p><b>Numeric (Float):</b><ul><li>Numbers with decimals for measurements, amounts, calculations. Polars: <code>Float64</code>.</li></ul></p>
+        <p><b>Integer (Whole Number):</b><ul><li>Whole numbers for counts or quantities. Polars: <code>Int64</code>.</li></ul></p>
+        <p><b>Datetime:</b><ul><li>Specific dates and/or times. Allows date-based calculations. Polars: <code>Datetime</code>. Conversion from strings will attempt to infer format.</li></ul></p>
+        <p><i>Choosing the right type helps with analysis and memory. Suggestions are based on data appearance. Conversions are generally non-strict (will produce nulls on failure rather than erroring).</i></p>
         </body></html>
         """
-        help_dialog = QMessageBox(self) 
+        help_dialog = QMessageBox(self)
         help_dialog.setWindowTitle("Data Type Conversion Help (Other DF)")
         help_dialog.setTextFormat(Qt.RichText)
         help_dialog.setText(help_text)
@@ -2300,7 +2867,7 @@ class DataTransformer(QMainWindow):
     def _create_help_dialog(self, title, html_content):
         dialog = QDialog(self)
         dialog.setWindowTitle(title)
-        dialog.setMinimumSize(650, 450) 
+        dialog.setMinimumSize(650, 450)
         layout = QVBoxLayout(dialog)
         text_browser = QTextBrowser()
         text_browser.setHtml(html_content)
@@ -2338,9 +2905,9 @@ class DataTransformer(QMainWindow):
              <li><strong><code>Vertical Common Columns</code> (Custom Logic):</strong>
                 <ul>
                     <li>This UI option first identifies columns with identical names in both DataFrames.</li>
-                    <li>Both DataFrames are temporarily subsetted to <em>only these common columns</em>.</li>
+                    <li>Both DataFrames are temporarily subsetted to <em>only these common columns</em>, preserving order from the 'Current DF'.</li>
                     <li>Then, a strict <code>vertical</code> concatenation is performed on these subsetted DataFrames.</li>
-                    <li>Ensures only shared schema parts are stacked, discarding non-common columns from both before stacking. Data types must match for common columns or an error may occur.</li>
+                    <li>Ensures only shared schema parts are stacked, discarding non-common columns from both before stacking. Data types must match for common columns or an error may occur during Polars' strict vertical concat.</li>
                 </ul>
             </li>
             <li><strong><code>Diagonal Relaxed</code>:</strong>
@@ -2356,20 +2923,20 @@ class DataTransformer(QMainWindow):
             <li><strong><code>Horizontal</code>:</strong>
                 <ul>
                     <li>Joins DataFrames side-by-side (column-wise).</li>
-                    <li>Polars attempts to align rows if possible (e.g. if DataFrames have the same height). If heights differ, the behavior might involve null-padding up to the height of the tallest DataFrame. It's best to ensure row counts are compatible.</li>
+                    <li>Polars requires DataFrames to have the same height for horizontal concatenation. If heights differ, this UI attempts to manage this by padding the shorter DataFrame with nulls, but it's best to ensure compatible row counts.</li>
                     <li>Use the <strong>Column Mapping UI</strong> to:
                         <ul>
                         <li>Select which columns from 'Current DF' to include (via checkbox).</li>
-                        <li>For each 'Current DF' column, select which 'Other DF' column it maps to (or '&lt;None&gt;').</li>
-                        <li>Specify the 'Output Column Name'. If this name clashes with another chosen output name or an existing column name, Polars may still auto-suffix (e.g., <code>_other</code>). Explicit unique output names are best.</li>
+                        <li>For each 'Current DF' column, select an 'Other DF' column it maps/aligns to (or '&lt;None&gt;'). This is primarily for conceptual alignment and determining the output name.</li>
+                        <li>Specify the 'Output Column Name'. If this name clashes with another chosen output name from the same DF or the other DF (after its own aliasing), Polars will auto-suffix the conflicting column from the rightmost DataFrame (e.g., adding <code>_right</code>). Explicit unique output names are best.</li>
                         </ul>
                      (Corresponds to Polars <code>how="horizontal"</code>)</li>
                 </ul>
             </li>
         </ul>
-        
+
         <h3>Alignment Strategies (Experimental/Advanced - Horizontal Focus)</h3>
-        <p>These strategies first attempt to align rows based on the values in the <strong>first column</strong> of each DataFrame, and then perform a horizontal concatenation. DataFrames should ideally be sorted by their first column for predictable results.</p>
+        <p>These strategies first attempt to align rows based on the values in the <strong>first column</strong> of each DataFrame, and then perform a horizontal concatenation. DataFrames should ideally be sorted by their first column for predictable results. These are advanced and may have specific requirements or behaviors in Polars.</p>
         <ul>
             <li><strong><code>Align</code>:</strong> (Polars <code>how="align"</code>)</li>
             <li><strong><code>Align Full</code> (Outer):</strong> (Polars <code>how="align_full"</code>)</li>
@@ -2377,7 +2944,7 @@ class DataTransformer(QMainWindow):
             <li><strong><code>Align Left</code> (Left):</strong> (Polars <code>how="align_left"</code>)</li>
             <li><strong><code>Align Right</code> (Right):</strong> (Polars <code>how="align_right"</code>)</li>
         </ul>
-        
+
         <p><strong>Rechunk:</strong> The 'Rechunk' option (if checked) performs a rechunk operation after concatenation. This can improve performance for subsequent operations. Usually recommended.</p>
         </body></html>
         """
@@ -2387,30 +2954,44 @@ class DataTransformer(QMainWindow):
         html_content = """
         <html><head><style> body { font-family: sans-serif; font-size: 10pt; } h3 { color: #333377; margin-top:1em; } code { background-color: #f0f0f0; padding: 1px 3px; border-radius: 3px; font-family: monospace;} pre { background-color: #f8f8f8; border: 1px solid #ddd; padding: 5px; border-radius: 3px; overflow-x: auto; } table { border-collapse: collapse; margin-top: 5px; } th, td { border: 1px solid #ccc; padding: 4px; text-align: left;} </style></head><body>
         <h2>Merge/Join Types (<code>df.join()</code>)</h2>
-        <p>Joining combines DataFrames based on common key columns or by row index.</p>
+        <p>Joining combines DataFrames based on common key columns. Use the table to map key columns from the 'Current DF' to key columns in the 'Other DF'. Multiple key pairs can be added for composite keys.</p>
 
         <ul>
-            <li><strong><code>inner</code>:</strong> Returns only the rows where the key(s) exist in <em>both</em> DataFrames.</li>
-            <li><strong><code>left</code>:</strong> Returns all rows from the <em>left</em> DataFrame and the matched rows from the <em>right</em> DataFrame. Nulls fill where no match in right.</li>
+            <li><strong><code>inner</code>:</strong> Returns only the rows where the mapped key(s) exist in <em>both</em> DataFrames.</li>
+            <li><strong><code>left</code>:</strong> Returns all rows from the <em>left</em> (Current) DataFrame and the matched rows from the <em>right</em> (Other) DataFrame. Nulls fill where no match in right.</li>
             <li><strong><code>outer</code>:</strong> Returns all rows from <em>both</em> DataFrames. Nulls fill where no match in the other DataFrame. (Polars also accepts <code>full</code> as an alias for <code>outer</code>).</li>
             <li><strong><code>semi</code>:</strong> Returns only rows from the <em>left</em> DataFrame for which there is a matching key in the <em>right</em> DataFrame. Only columns from the left DataFrame are included.</li>
             <li><strong><code>anti</code>:</strong> Returns only rows from the <em>left</em> DataFrame for which there is <em>no</em> matching key in the <em>right</em> DataFrame. Only columns from the left DataFrame are included.</li>
-            <li><strong><code>cross</code>:</strong> Returns the Cartesian product (all combinations of rows). No keys needed. <strong>Use with extreme caution on large DataFrames!</strong></li>
+            <li><strong><code>cross</code>:</strong> Returns the Cartesian product (all combinations of rows). No keys needed; key mapping table will be disabled. <strong>Use with extreme caution on large DataFrames!</strong></li>
         </ul>
-        
-        <p><strong>Suffix:</strong> If both DataFrames have non-key columns with the same name, the specified suffix (e.g., <code>_other</code>) is added to distinguish the columns coming from the 'Other' (right) DataFrame in the result.</p>
-        <h3>Example:</h3>
-        <pre>
-left_df = pl.DataFrame({"ID": [1, 2, 3, 5], "Name": ["Alice", "Bob", "Charlie", "David"], "Value": [10,20,30,40]})
-right_df = pl.DataFrame({"ID": [1, 2, 4, 5], "City": ["NY", "LA", "SF", "CHI"], "Value": [15,25,45,55]})
 
-# Inner Join with suffix="_other" for clashing 'Value' column
-inner_join = left_df.join(right_df, on="ID", how="inner", suffix="_other")
+        <p><strong>Key Mapping Table:</strong></p>
+        <ul>
+            <li><strong>Use for Join:</strong> Check this box to include the key pair in the join operation.</li>
+            <li><strong>Current DF Key:</strong> Select a column from the current (left) DataFrame.</li>
+            <li><strong>'Other' DF Key:</strong> Select the corresponding column from the 'Other' (right) DataFrame to join on.</li>
+            <li>Add multiple rows for multi-column joins (e.g., joining on (ID, Date) from current to (UserID, EventDate) from other).</li>
+        </ul>
+        <p><strong>Suffix:</strong> If both DataFrames have non-key columns with the same name, the specified suffix (e.g., <code>_other</code>) is added to distinguish the columns coming from the 'Other' (right) DataFrame in the result.</p>
+        <h3>Example (Multi-key):</h3>
+        <pre>
+current_df = pl.DataFrame({"ID": [1, 1, 2], "Date": ["2023-01-01", "2023-01-02", "2023-01-01"], "ValueL": [10,12,20]})
+other_df = pl.DataFrame({"UserID": [1, 2, 1], "EventDate": ["2023-01-01", "2023-01-01", "2023-01-03"], "ValueR": [100,200,300]})
+
+# Assuming UI maps:
+#   "ID" (Current) <=> "UserID" (Other)
+#   "Date" (Current) <=> "EventDate" (Other)
+
+# Polars equivalent:
+joined_df = current_df.join(other_df, 
+                            left_on=["ID", "Date"], 
+                            right_on=["UserID", "EventDate"], 
+                            how="inner")
 # Output:
-# │ ID  ┆ Name  ┆ Value ┆ City ┆ Value_other │
-# │ 1   ┆ Alice ┆ 10    ┆ NY   ┆ 15          │
-# │ 2   ┆ Bob   ┆ 20    ┆ LA   ┆ 25          │
-# │ 5   ┆ David ┆ 40    ┆ CHI  ┆ 55          │
+# │ ID  ┆ Date       ┆ ValueL ┆ ValueR │
+# │ --- ┆ ---        ┆ ---    ┆ ---    │
+# │ 1   ┆ 2023-01-01 ┆ 10     ┆ 100    │
+# │ 2   ┆ 2023-01-01 ┆ 20     ┆ 200    │
         </pre>
         </body></html>
         """
@@ -2425,27 +3006,30 @@ inner_join = left_df.join(right_df, on="ID", how="inner", suffix="_other")
         <h3>Melt (Unpivot / Wide to Long)</h3>
         <p><strong>Purpose:</strong> Makes data "taller" and "narrower". Converts columns into rows.</p>
         <ul>
-            <li><strong>ID Variable(s) (<code>id_vars</code>):</strong> Columns to keep as they are. (Excel: Rows in a PivotTable Report Filter / Row Labels that are not part of the unpivot action).</li>
-            <li><strong>Value Variables (<code>value_vars</code>):</strong> Columns to unpivot. Their names go into a new 'variable' column, their values into a new 'value' column. If empty, all non-ID vars are melted. (Excel: These are like multiple columns you'd drag into the 'Values' area of a PivotTable one by one if they represented different time periods or categories of the same measure).</li>
+            <li><strong>ID Variable(s) (<code>id_vars</code>):</strong> Columns to keep as they are. Their values are repeated for each unpivoted row.</li>
+            <li><strong>Value Variables (<code>value_vars</code>):</strong> Columns to unpivot. Their names go into a new 'variable' column, and their corresponding values go into a new 'value' column. If this list is empty, all columns NOT selected as ID Variables will be unpivoted.</li>
+            <li><strong>Variable Name:</strong> The name for the new column that will hold the names of the `value_vars`. Default: "variable".</li>
+            <li><strong>Value Name:</strong> The name for the new column that will hold the values from the `value_vars`. Default: "value".</li>
         </ul>
         <p><strong>Example:</strong></p>
-        <p><em>Input:</em></p> <table><tr><th>Prod</th><th>Q1_Sales</th><th>Q2_Sales</th></tr><tr><td>A</td><td>10</td><td>12</td></tr></table>
-        <p><em>Melt (ID Vars=["Prod"]):</em></p>
-        <table><tr><th>Prod</th><th>variable</th><th>value</th></tr><tr><td>A</td><td>Q1_Sales</td><td>10</td></tr><tr><td>A</td><td>Q2_Sales</td><td>12</td></tr></table>
+        <p><em>Input:</em></p> <table><tr><th>Product</th><th>Q1_Sales</th><th>Q2_Sales</th></tr><tr><td>A</td><td>10</td><td>12</td></tr></table>
+        <p><em>Melt (ID Vars=["Product"], Variable Name="Quarter", Value Name="Sales"):</em></p>
+        <table><tr><th>Product</th><th>Quarter</th><th>Sales</th></tr><tr><td>A</td><td>Q1_Sales</td><td>10</td></tr><tr><td>A</td><td>Q2_Sales</td><td>12</td></tr></table>
 
         <hr style="margin: 20px 0;">
         <h3>Pivot (Long to Wide)</h3>
-        <p><strong>Purpose:</strong> Makes data "wider" and "shorter". Converts unique values from one column into new column headers.</p>
+        <p><strong>Purpose:</strong> Makes data "wider" and "shorter". Converts unique values from one column into new column headers, populating cells with values from another column.</p>
         <ul>
-            <li><strong>Index Column(s) (<code>index</code>):</strong> Column(s) forming unique rows in the new wide DF. (Excel: Fields dragged to 'Rows' area of a PivotTable).</li>
-            <li><strong>Columns (from values of) (<code>columns</code>):</strong> Column whose unique values become new column headers. (Excel: Fields dragged to 'Columns' area).</li>
-            <li><strong>Values (populate new cols) (<code>values</code>):</strong> Column whose values fill the new cells. (Excel: Fields dragged to 'Values' area).</li>
-            <li><strong>Aggregation (<code>aggregate_function</code>):</strong> Handles multiple values for the same index/columns combination (e.g., "first", "sum", "mean"). (Excel: Summarize Values By option in PivotTable).</li>
+            <li><strong>Index Column(s) (<code>index</code>):</strong> Column(s) whose unique combinations will form the rows in the new wide DataFrame.</li>
+            <li><strong>Columns (from values of) (<code>columns</code>):</strong> The column whose unique values will become the new column headers in the wide DataFrame.</li>
+            <li><strong>Values (populate new cols) (<code>values</code>):</strong> The column whose values will fill the cells of the new wide DataFrame, corresponding to the index rows and new column headers.</li>
+            <li><strong>Aggregation (<code>aggregate_function</code>):</strong> Function to use if there are multiple `values` for the same combination of `index` and `columns`. Examples: "first", "last", "sum", "mean", "min", "max", "count", "list".</li>
         </ul>
-        <p><strong>Example (using melted output from above):</strong></p>
-        <p><em>Input:</em></p> <table><tr><th>Prod</th><th>Quarter</th><th>Sales</th></tr><tr><td>A</td><td>Q1_Sales</td><td>10</td></tr><tr><td>A</td><td>Q2_Sales</td><td>12</td></tr></table>
-        <p><em>Pivot (Index="Prod", Columns="Quarter", Values="Sales", Aggregation="first"):</em></p>
-        <table><tr><th>Prod</th><th>Q1_Sales</th><th>Q2_Sales</th></tr><tr><td>A</td><td>10</td><td>12</td></tr></table>
+        <p><strong>Example (using melted output from above as input for pivot):</strong></p>
+        <p><em>Input:</em></p> <table><tr><th>Product</th><th>Quarter</th><th>Sales</th></tr><tr><td>A</td><td>Q1_Sales</td><td>10</td></tr><tr><td>A</td><td>Q2_Sales</td><td>12</td></tr></table>
+        <p><em>Pivot (Index="Product", Columns="Quarter", Values="Sales", Aggregation="first"):</em></p>
+        <table><tr><th>Product</th><th>Q1_Sales</th><th>Q2_Sales</th></tr><tr><td>A</td><td>10</td><td>12</td></tr></table>
+        <p><i>Use the "Revert Last Pivot/Melt" buttons or the general Undo (Ctrl+Z) if the result is not as expected.</i></p>
         </body></html>
         """
         self._create_help_dialog("Reshaping Data: Pivot vs. Melt Help", html_content)
@@ -2463,17 +3047,20 @@ inner_join = left_df.join(right_df, on="ID", how="inner", suffix="_other")
     def closeEvent(self, event):
         if self.undo_stack:
             reply = QMessageBox.question(self, "Confirm Exit",
-                                           "You have unsaved transformations. Do you want to save before exiting?",
+                                           "You have unsaved transformations. Do you want to save the current data before exiting?",
                                            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
                                            QMessageBox.Cancel)
             if reply == QMessageBox.Save:
-                self._handle_save_file() 
+                save_successful = self._handle_save_file()
+                if save_successful is False:
+                    event.ignore()
+                    return
                 logger.log_action("DataTransformer", "Application Close", "User chose to save transformations upon exit.")
-                event.accept() 
+                event.accept()
             elif reply == QMessageBox.Discard:
                 logger.log_action("DataTransformer", "Application Close", "User chose to discard transformations upon exit.")
                 event.accept()
-            else: 
+            else:
                 logger.log_action("DataTransformer", "Application Close", "User cancelled closing.")
                 event.ignore()
         else:
@@ -2482,41 +3069,61 @@ inner_join = left_df.join(right_df, on="ID", how="inner", suffix="_other")
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
-    
+
     class DummySourceApp(QWidget):
         def __init__(self):
             super().__init__()
             self.setWindowTitle("Dummy Source Application")
+            self.setGeometry(1600, 200, 400, 200)
+            layout = QVBoxLayout(self)
+            self.label = QLabel("Waiting for data from DataTransformer...")
+            layout.addWidget(self.label)
+            self.show()
+
         def load_dataframe_from_source(self, df, name_hint, source_log_file_path):
-            print(f"DummySourceApp: Received data '{name_hint}' (shape: {df.shape}) from DataTransformer.")
-            print(f"DummySourceApp: Log file path from DT: {source_log_file_path}")
-            QMessageBox.information(self, "Data Received by Dummy", f"Received: {name_hint}\nShape: {df.shape}\nLog: {source_log_file_path}")
+            message = (f"DummySourceApp: Received data '{name_hint}'\n"
+                       f"Shape: {df.shape}\n"
+                       f"Log file from DT: {os.path.basename(source_log_file_path if source_log_file_path else 'N/A')}\n"
+                       f"Data columns: {df.columns[:5]}{'...' if len(df.columns) > 5 else ''}")
+            print(message)
+            self.label.setText(message.replace("\n", "<br>"))
+            QMessageBox.information(self, "Data Received by Dummy", message)
+
+        def receive_dataframe(self, df, name_hint, log_file_path_from_source=None):
+            self.load_dataframe_from_source(df, name_hint, log_file_path_from_source)
+
+    dummy_app_instance = None
 
     sample_data_current = {
-        'ID': [1, 2, 3, 4, 5], 
-        'Name': ['Alice', 'Bob', 'Charlie', 'David', 'Eve'], 
-        'Value_X': [10, 20, 30, 40, 50], 
-        'Common_Col': [100,200,300,400,500],
-        'Date_Current': pl.date_range(date(2023,1,1), date(2023,1,5), eager=True)
+        'ID_L': [1, 2, 3, 4, 5, 1, 2],
+        'Group_L': ['G1', 'G2', 'G1', 'G3', 'G2', 'G1', 'G2'],
+        'Category': ['A', 'B', 'A', 'C', 'B', 'A', 'B'],
+        'Value1': [10, 20, 30, 40, 50, 15, 25],
+        'Value2': [100,200,300,400,500, 150, 250],
+        'Date_Current': pl.date_range(date(2023,1,1), date(2023,1,7), eager=True),
+        'LongDataField': [f"Item {i} with some extra text here to make it longer" for i in range(7)]
     }
     initial_polars_df = pl.DataFrame(sample_data_current)
-    
-    transformer_window = DataTransformer(initial_df=initial_polars_df, df_name_hint="SampleDataCurrent.testing")
+
+    transformer_window = DataTransformer(source_app=dummy_app_instance,
+                                         initial_df=initial_polars_df,
+                                         df_name_hint="SampleDataCurrent.testing")
 
     sample_data_other = {
-        'ID_other': [2, 3, 4, 6, 7], 
-        'Department': ['HR', 'IT', 'Sales', 'RD', 'MKG'], 
-        'Value_Y': [100, 200, 300, 600, 700], 
-        'Name_Rel': ['Robert', 'Charles', 'Diana', 'Frank', 'Grace'], 
-        'Common_Col': [11,22,33,66,77], 
-        'Date_Other': pl.date_range(date(2024,1,1), date(2024,1,5), eager=True)
-    } 
+        'ID_R': [2, 3, 4, 6, 7, 8, 9, 1],
+        'Group_R': ['G2', 'G1', 'G3', 'G4', 'G2', 'G5', 'G6', 'G1'],
+        'Department': ['HR', 'IT', 'Sales', 'RD', 'MKG', 'FIN', 'OPS', 'HR'],
+        'Value_Y': [100.5, 200.2, 300.9, 600.1, 700.6, 800.0, 900.3, 10.0],
+        'Category_Other': ['B', 'A', 'C', 'D', 'B', 'A', 'C', 'A'],
+        'Name_Rel': ['Robert', 'Charles', 'Diana', 'Frank', 'Grace', 'Henry', 'Ivy', 'AliceNew'],
+        'Date_Other': pl.date_range(date(2023,1,1), date(2023,1,8), eager=True)
+    }
     other_df = pl.DataFrame(sample_data_other)
-    
+
     transformer_window.other_df_for_combine = other_df
     transformer_window.other_df_name_hint = "SampleDataOther.testing"
     transformer_window.update_df_info_label()
-    transformer_window._update_all_column_lists() 
+    transformer_window._update_all_column_lists()
     transformer_window._update_ui_for_data_state()
 
 

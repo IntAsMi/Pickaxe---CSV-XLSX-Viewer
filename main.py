@@ -58,10 +58,13 @@ pl.when(pl.col("POL_NB").cast(pl.Utf8).fill_null("").str.contains(r"^(?i)\d+$"))
 
 def resource_path(relative_path):
     """ Get absolute path to resource, works for dev and for PyInstaller/Nuitka """
-    try:
-        # PyInstaller/Nuitka creates a temp folder and stores path in _MEIPASS
-        base_path = sys._MEIPASS
-    except AttributeError: # AttributeError if _MEIPASS is not set (e.g. running as script)
+    if hasattr(sys, r'_MEIPASS') :
+        try:
+            # PyInstaller/Nuitka creates a temp folder and stores path in _MEIPASS
+            base_path = sys._MEIPASS
+        except AttributeError: # AttributeError if _MEIPASS is not set (e.g. running as script)
+            base_path = os.path.abspath(".")
+    else:
         base_path = os.path.abspath(".")
     return os.path.join(base_path, relative_path)
 
@@ -3414,7 +3417,6 @@ class Pickaxe(QMainWindow):
                                        QMessageBox.No)
             if reply == QMessageBox.Yes:
                 self.suggest_and_convert_types()
-                
             elif reply == QMessageBox.Cancel:
                 self.statusBar().showMessage("Visual Workshop launch cancelled.", 2000)
                 return

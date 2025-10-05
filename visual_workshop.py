@@ -1,4 +1,3 @@
-
 # visual_workshop.py
 import sys
 import os
@@ -16,10 +15,14 @@ from PySide6.QtWidgets import (
     QMessageBox, QDialog, QDialogButtonBox, QSizePolicy, QRadioButton, QButtonGroup,
     QTextEdit, QToolButton
 )
-from PySide6.QtCore import Qt, Slot, QSize
+from PySide6.QtCore import Qt, Slot, QSize, QUrl, QBuffer, QIODevice
 from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWebEngineWidgets import QWebEngineView
-from PySide6.QtWebEngineCore import QWebEngineSettings
+# Import necessary classes for the scheme handler
+from PySide6.QtWebEngineCore import (
+    QWebEngineSettings, QWebEngineProfile, QWebEnginePage,
+    QWebEngineUrlScheme, QWebEngineUrlSchemeHandler, QWebEngineUrlRequestJob
+)
 import traceback
 import datetime
 from scipy.stats import norm
@@ -43,6 +46,38 @@ try:
 except ImportError:
     PICKAXE_LOADERS_AVAILABLE = False
 
+
+
+class PlotSchemeHandler(QWebEngineUrlSchemeHandler):
+    """
+    A custom URL scheme handler to serve Plotly figures from memory.
+    This avoids the 2MB limit of setHtml and the need for temporary files.
+    """
+    def __init__(self, app_instance):
+        super().__init__()
+        # Store a reference to the main app to access the plot figure
+        self.app = app_instance
+
+    def requestStarted(self, job: QWebEngineUrlRequestJob) -> None:
+        url = job.requestUrl()
+        plot_id = url.host()
+
+        if self.app.current_plotly_fig and plot_id == "current_plot":
+            fig = self.app.current_plotly_fig
+            
+            html = pio.to_html(fig, full_html=True, include_plotlyjs=True)
+            
+            buf = QBuffer()
+            buf.open(QIODevice.WriteOnly)
+            buf.write(html.encode('utf-8'))
+            buf.seek(0)
+            # The buffer does not need to be closed here, as reply() will read from it.
+            # job.destroyed will take care of the QBuffer's lifetime if we parent it.
+            buf.setParent(job)
+            
+            job.reply(b"text/html", buf)
+        else:
+            job.fail(QWebEngineUrlRequestJob.Error.UrlNotFound)
 
 class CollapsibleGroupBox(QGroupBox):
     def __init__(self, title="", parent=None, checked=False): # Added checked default
@@ -71,22 +106,17 @@ class CollapsibleGroupBox(QGroupBox):
             self.content_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
             self.content_widget.setMaximumHeight(0)
         
-        # Adjust the content widget's own size based on its content (important if content changed while hidden)
         self.content_widget.adjustSize() 
-        
-        # Adjust the CollapsibleGroupBox's size
         self.adjustSize()
 
-        # Propagate layout update to parent(s)
         parent = self.parentWidget()
         while parent:
             if parent.layout():
                 parent.layout().activate()
-            # If inside QScrollArea, its viewport needs to know about size changes
             if isinstance(parent, QScrollArea):
-                 if parent.widget(): # If scroll area has a widget (it should)
-                     parent.widget().adjustSize() # Adjust the scroll area's content widget
-                 parent.updateGeometry() # Tell scroll area its overall geometry might have changed
+                 if parent.widget():
+                     parent.widget().adjustSize()
+                 parent.updateGeometry()
             parent = parent.parentWidget()
         
         QApplication.processEvents()
@@ -94,10 +124,9 @@ class CollapsibleGroupBox(QGroupBox):
 
     def add_widget_to_content(self, widget):
         self.content_layout.addWidget(widget)
-        # If adding widgets, and it's currently expanded, update sizes
         if self.isChecked():
             self.content_widget.adjustSize()
-            self.adjustSize() # And the groupbox itself
+            self.adjustSize()
 
     def get_content_layout(self):
         return self.content_layout
@@ -118,10 +147,25 @@ class VisualWorkshopApp(QMainWindow):
         self.advanced_group = None
         self.distplot_advanced_group = None
         self.pie_advanced_group = None
+        
+        # --- Scheme Handler Setup ---
+        self.PLOT_SCHEME = b"plotly-figure"
+        
+        # FIX: Check if the scheme is already registered before trying again.
+        # This prevents the "already registered" warning in interactive environments.
+        scheme = QWebEngineUrlScheme.schemeByName(self.PLOT_SCHEME)
+        if not scheme.name(): # A non-registered scheme will have an empty name
+            scheme = QWebEngineUrlScheme(self.PLOT_SCHEME)
+            scheme.setSyntax(QWebEngineUrlScheme.Syntax.HostAndPort)
+            scheme.setDefaultPort(24815)
+            scheme.registerScheme(scheme)
 
-        # For hover data config
-        self.hover_data_configs = {} # Stores {'col_name': {'checkbox': QCheckBox, 'lineedit': QLineEdit}}
-
+        self.profile = QWebEngineProfile(f"vw-profile-{id(self)}", self)
+        self.plot_handler = PlotSchemeHandler(self)
+        self.profile.installUrlSchemeHandler(self.PLOT_SCHEME, self.plot_handler)
+        
+        self.hover_data_configs = {}
+        
         if not self.current_log_file_path:
             default_log_name = f".__log__vw_session_default_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
             self.current_log_file_path = os.path.join(os.getcwd(), default_log_name)
@@ -284,7 +328,14 @@ class VisualWorkshopApp(QMainWindow):
     def _create_plot_display_pane(self):
         self.plot_display_widget = QWidget()
         plot_display_layout = QVBoxLayout(self.plot_display_widget)
-        self.plot_view = QWebEngineView()
+        
+        # Create a QWebEnginePage that uses our custom profile
+        page = QWebEnginePage(self.profile, self)
+
+        # Create the QWebEngineView using this page
+        self.plot_view = QWebEngineView(self)
+        self.plot_view.setPage(page)
+        
         self.plot_view.settings().setAttribute(QWebEngineSettings.WebAttribute.ScrollAnimatorEnabled, True)
         self.plot_view.settings().setAttribute(QWebEngineSettings.WebAttribute.PluginsEnabled, True)
         self.plot_view.setHtml("<div style='display:flex;justify-content:center;align-items:center;height:100%;font-family:sans-serif;color:grey;'>Load data and configure a plot to display.</div>")
@@ -314,7 +365,7 @@ class VisualWorkshopApp(QMainWindow):
         self.advanced_config_widgets.clear()
         self.distplot_advanced_widgets.clear()
         self.pie_advanced_widgets.clear()
-        self.hover_data_configs.clear() # Clear hover config specific storage
+        self.hover_data_configs.clear()
 
         basic_group = QGroupBox(f"Basic {plot_type_name} Configuration")
         basic_layout = QVBoxLayout(basic_group)
@@ -335,7 +386,6 @@ class VisualWorkshopApp(QMainWindow):
             self.config_layout.addWidget(self.advanced_group)
 
         self.config_layout.addStretch()
-        # After UI is rebuilt, try to auto-populate color map if applicable
         self._auto_populate_color_discrete_map()
 
 
@@ -359,11 +409,9 @@ class VisualWorkshopApp(QMainWindow):
         if "color_col" in self.basic_config_widgets:
             color_combo = self.basic_config_widgets["color_col"]
             if color_combo:
-                # Disconnect previous connection if any to avoid multiple calls
-                try: color_combo.currentTextChanged.disconnect(self._on_basic_color_col_changed_for_map)
-                except RuntimeError: pass # No connection to disconnect
+                # FIX: Removed the `try...except` for disconnecting.
+                # Qt's `deleteLater()` on the parent widget handles connection cleanup.
                 color_combo.currentTextChanged.connect(self._on_basic_color_col_changed_for_map)
-
 
     @Slot(str)
     def _on_basic_color_col_changed_for_map(self, _text):
@@ -794,7 +842,6 @@ class VisualWorkshopApp(QMainWindow):
         self._add_widget_pair("Colors (CSV):", QLineEdit(), layout, self.distplot_advanced_widgets, "distplot_colors").setPlaceholderText("#FF0000,#00FF00,...")
         tpl_combo = self._add_widget_pair("Plot Template:", QComboBox(), layout, self.distplot_advanced_widgets, "template_combo")
         tpl_combo.addItems(["None", "plotly", "plotly_white", "plotly_dark", "ggplot2", "seaborn", "simple_white"])
-        # Distplot hover is handled by figure_factory, so custom hover UI is not added here.
 
 
     def receive_dataframe(self, polars_df, filename_hint, log_file_path_from_source=None):
@@ -834,7 +881,6 @@ class VisualWorkshopApp(QMainWindow):
         self._update_plot_config_ui(self.plot_type_combo.currentText()) # This will rebuild UI and repopulate hover config
 
     def refresh_data_from_pickaxe(self):
-        # ... (implementation unchanged) ...
         if self.source_app and hasattr(self.source_app, 'get_current_dataframe_for_vw') and \
            hasattr(self.source_app, 'get_current_filename_hint_for_vw'):
             df = self.source_app.get_current_dataframe_for_vw()
@@ -853,7 +899,6 @@ class VisualWorkshopApp(QMainWindow):
 
 
     def open_file_directly(self):
-        # ... (implementation largely unchanged, ensures receive_dataframe is called) ...
         df_loaded = None
         file_name_loaded = None
 
@@ -912,29 +957,16 @@ class VisualWorkshopApp(QMainWindow):
 
 
     def _update_ui_for_data(self):
+        
         has_data = self.current_df is not None and not self.current_df.is_empty()
         self.generate_plot_button.setEnabled(has_data)
-        # Refresh hover data config if UI is already built for it
-        if hasattr(self, 'hover_data_configs') and self.hover_data_configs: # Check if exists and populated
+        if hasattr(self, 'hover_data_configs') and self.hover_data_configs: 
             plot_type = self.plot_type_combo.currentText()
-            # This is a bit tricky, as _update_plot_config_ui rebuilds everything.
-            # We ensure _update_plot_config_ui is called, which will then call _add_advanced_config_widgets.
             self._update_plot_config_ui(plot_type)
 
 
     def _calculate_representative_sample_size(self, df, target_column_name, margin_error_percent=5, confidence_level_percent=95):
-        """
-        Calculates a sample size aiming for representativeness using Polars.
-        Adapted from the provided statistical formula.
-        Args:
-            df (pl.DataFrame): The DataFrame to sample from.
-            target_column_name (str): The primary column to base the representativeness on.
-                                      This is a simplification; true representativeness is complex.
-            margin_error_percent (float): Desired margin of error in percentage points (e.g., 5 for +/- 5%).
-            confidence_level (float): Desired confidence level (e.g., 0.95 for 95%).
-        Returns:
-            int: The calculated sample size, capped by the DataFrame's length.
-        """
+        
         if target_column_name not in df.columns:
             self.statusBar().showMessage(f"Target column '{target_column_name}' for sampling not found. Using max 10k rows.", 3000)
             return min(10000, df.height)
@@ -955,7 +987,7 @@ class VisualWorkshopApp(QMainWindow):
             self.statusBar().showMessage("Scipy not found, Z-score may not match selected confidence. Using 1.96 for 95% Confidence.", 2000)
             if confidence_level == 0.90: Z = 1.645
             elif confidence_level == 0.99: Z = 2.576
-        except Exception: # Catch any other scipy error
+        except Exception: 
             self.statusBar().showMessage("Scipy.stats.norm not available, Z-score may not match. Using 1.96 for 95% Confidence.", 2000)
 
 
@@ -1011,6 +1043,7 @@ class VisualWorkshopApp(QMainWindow):
 
     @Slot()
     def generate_plot(self):
+        # ... (Sampling and argument gathering logic is unchanged) ...
         if self.current_df is None or self.current_df.is_empty():
             QMessageBox.information(self, "No Data", "Please load data before generating a plot.")
             return
@@ -1021,7 +1054,6 @@ class VisualWorkshopApp(QMainWindow):
         plot_type = self.plot_type_combo.currentText()
         df_for_plot_op = self.current_df
 
-        # --- Apply Sampling Logic ---
         df_to_plot = df_for_plot_op
         target_col_for_sampling = None
         sampling_method_log = "Use all data"
@@ -1036,9 +1068,8 @@ class VisualWorkshopApp(QMainWindow):
             margin_error_val = self.margin_error_input_rep.value()
             confidence_level_val = int(self.ci_combo.currentText())
             sampling_method_log = f"Representative sample (CI: {confidence_level_val}%, MoE: {margin_error_val}%)"
-
             basic_args_temp = {k: self._get_widget_value(w) for k, w in self.basic_config_widgets.items()}
-            
+            target_col_for_sampling = None
             if plot_type in ["Scatter Plot", "Line Plot", "Bar Chart", "Box Plot", "Violin Plot", "Strip Plot", "Density Contour"]:
                 target_col_for_sampling = basic_args_temp.get('y_col')
             elif plot_type == "Histogram": target_col_for_sampling = basic_args_temp.get('x_col')
@@ -1053,7 +1084,7 @@ class VisualWorkshopApp(QMainWindow):
                     df_for_plot_op, target_col_for_sampling, margin_error_val, confidence_level_val
                 )
                 proceed_with_large_sample = True
-                if calculated_sample_size > 100000: # Threshold for warning
+                if calculated_sample_size > 100000: 
                     reply = QMessageBox.warning(self, "Large Sample Size",
                                                 f"The calculated sample size is {calculated_sample_size:,} rows. "
                                                 "Plotting this may be very slow or consume a lot of memory.\n\n"
@@ -1062,7 +1093,7 @@ class VisualWorkshopApp(QMainWindow):
                     if reply == QMessageBox.No:
                         proceed_with_large_sample = False
                         self.statusBar().showMessage("Plotting with large sample cancelled.", 3000)
-                        return # Abort
+                        return
 
                 if proceed_with_large_sample:
                     if calculated_sample_size < df_for_plot_op.height:
@@ -1087,39 +1118,33 @@ class VisualWorkshopApp(QMainWindow):
         log_details["Sampling Details"] = f"{sampling_method_log}, Plotting with: {df_to_plot.height} rows"
 
         advanced_args = {}
-        # Get hover data config from the new structure
         hover_data_setting = []
         for col_name, config in self.hover_data_configs.items():
             if config['checkbox'].isChecked():
                 custom_name = config['lineedit'].text().strip()
                 hover_data_setting.append({'original_name': col_name, 'display_name': custom_name if custom_name else col_name})
         
-        # Determine which advanced_config dictionary to use
         adv_config_source_dict = {}
         current_advanced_group = None
-
         if plot_type == "Distribution Plot (Distplot)":
             adv_config_source_dict = self.distplot_advanced_widgets
             current_advanced_group = self.distplot_advanced_group
         elif plot_type == "Pie Chart":
             adv_config_source_dict = self.pie_advanced_widgets
             current_advanced_group = self.pie_advanced_group
-        else: # Generic advanced
+        else: 
             adv_config_source_dict = self.advanced_config_widgets
             current_advanced_group = self.advanced_group
         
         if current_advanced_group and current_advanced_group.isChecked():
             advanced_args = {k: self._get_widget_value(w) for k, w in adv_config_source_dict.items()}
         
-        # Add hover data to advanced_args if not distplot/pie (they handle hover differently or not via this generic path)
         if plot_type not in ["Distribution Plot (Distplot)", "Pie Chart"]:
-            advanced_args['hover_data_config'] = hover_data_setting # Store the list of dicts
-
+            advanced_args['hover_data_config'] = hover_data_setting
         if advanced_args:
             log_details.update({f"Adv: {k}": v for k,v in advanced_args.items() if v != "None" and v != "" and v is not False and not (isinstance(v, list) and not v) and k != 'hover_data_config'})
             if 'hover_data_config' in advanced_args:
                  log_details["Adv: Hover Columns"] = ", ".join([item['display_name'] for item in advanced_args['hover_data_config']])
-
 
         fig = None
         try:
@@ -1168,19 +1193,24 @@ class VisualWorkshopApp(QMainWindow):
                 fig = go.Figure()
                 self._add_traces_for_plot(fig, plot_type, df_to_plot, basic_args, advanced_args)
 
-            self._apply_advanced_layout(fig, advanced_args, basic_args, plot_type, df_to_plot) # Pass df_to_plot for context
-
+            self._apply_advanced_layout(fig, advanced_args, basic_args, plot_type, df_to_plot)
+            
+            # --- MODIFICATION: Use the scheme handler ---
+            # 1. Store the figure so the handler can access it.
             self.current_plotly_fig = fig
-            html_output = pio.to_html(fig, full_html=False, include_plotlyjs='cdn')
-            self.plot_view.setHtml(html_output)
+            
+            # 2. Load the plot using our custom URL scheme.
+            # The handler will intercept this and serve the plot from memory.
+            plot_url = QUrl(f"{self.PLOT_SCHEME.decode()}://current_plot")
+            self.plot_view.load(plot_url)
+            # --- End of modification ---
+            
             self.statusBar().showMessage("Plot generated successfully.", 3000)
             self.save_plot_button.setEnabled(True)
 
             logger.log_action(
-                "VisualWorkshop", "Plot Generated",
-                f"Generated {plot_type}.",
-                details=log_details,
-                df_shape_before=df_to_plot.shape
+                "VisualWorkshop", "Plot Generated", f"Generated {plot_type}.",
+                details=log_details, df_shape_before=df_to_plot.shape
             )
 
         except Exception as e:
@@ -1197,7 +1227,6 @@ class VisualWorkshopApp(QMainWindow):
             )
 
     def save_current_plot(self):
-        # ... (implementation unchanged) ...
         if self.current_plotly_fig is None:
             QMessageBox.warning(self, "No Plot", "No plot has been generated yet to save.")
             return
@@ -1208,7 +1237,7 @@ class VisualWorkshopApp(QMainWindow):
             self, 
             "Save Plot As",
             default_filename,
-            "HTML File (*.html);;PNG Image (*.png);;JPEG Image (*.jpg);;SVG Image (*.svg);;PDF Document (*.pdf)" # Added more formats
+            "HTML File (*.html);;PNG Image (*.png);;JPEG Image (*.jpg);;SVG Image (*.svg);;PDF Document (*.pdf)"
         )
 
         if not file_name:
@@ -1216,7 +1245,7 @@ class VisualWorkshopApp(QMainWindow):
 
         try:
             if self.current_log_file_path:
-                logger.set_log_file(self.current_log_file_path, "VisualWorkshop") # Ensure logger context
+                logger.set_log_file(self.current_log_file_path, "VisualWorkshop")
 
             file_format = ""
             if selected_filter == "HTML File (*.html)":
@@ -1236,12 +1265,12 @@ class VisualWorkshopApp(QMainWindow):
             elif selected_filter.endswith("(*.svg)"):
                 if not KALEIDO_AVAILABLE: raise Exception("Kaleido package is required for static image export.")
                 if not file_name.lower().endswith(".svg"): file_name += ".svg"
-                self.current_plotly_fig.write_image(file_name, scale=2) # Scale might not be as relevant for SVG
+                self.current_plotly_fig.write_image(file_name, scale=2)
                 file_format = "SVG"
             elif selected_filter.endswith("(*.pdf)"):
                 if not KALEIDO_AVAILABLE: raise Exception("Kaleido package is required for static image export.")
                 if not file_name.lower().endswith(".pdf"): file_name += ".pdf"
-                self.current_plotly_fig.write_image(file_name) # No scale for PDF usually
+                self.current_plotly_fig.write_image(file_name)
                 file_format = "PDF"
             else:
                 QMessageBox.warning(self, "Unknown Format", "Selected file format is not supported.")
@@ -1263,21 +1292,18 @@ class VisualWorkshopApp(QMainWindow):
 
 
     def _add_traces_for_plot(self, fig, plot_type, df, basic_args, advanced_args, row=None, col=None):
-        # Get the hover configuration (list of {'original_name': str, 'display_name': str})
-        hover_data_config = advanced_args.get('hover_data_config', []) # Comes from generate_plot
+        hover_data_config = advanced_args.get('hover_data_config', [])
 
         customdata_numpy_array = None
-        # This list will store just the original column names for building customdata
         original_col_names_for_customdata = []
 
-        if plot_type not in ["Bar Chart", "Pie Chart", "Distribution Plot (Distplot)"]: # These handle customdata/hover differently
+        if plot_type not in ["Bar Chart", "Pie Chart", "Distribution Plot (Distplot)"]:
             if hover_data_config and not df.is_empty():
                 select_exprs = []
                 for item in hover_data_config:
                     original_name = item['original_name']
                     if original_name in df.columns:
                         original_col_names_for_customdata.append(original_name)
-                        # Cast to string for customdata, handle dates explicitly for consistent format
                         if df.schema[original_name] in [pl.Date, pl.Datetime]:
                             select_exprs.append(pl.col(original_name).dt.strftime("%Y-%m-%d %H:%M:%S").fill_null("N/A").alias(original_name))
                         else:
@@ -1289,53 +1315,37 @@ class VisualWorkshopApp(QMainWindow):
                         customdata_numpy_array = None
                         original_col_names_for_customdata = []
         
-        # `final_ordered_hover_names_for_customdata` now becomes `hover_data_config`
-        # which contains both original and display names.
-        # The `customdata_numpy_array` is built using original names in the order they appear in `hover_data_config`.
-
         plot_trace_adders = {
-            "Scatter Plot": self._add_scatter_traces,
-            "Line Plot": self._add_line_traces,
-            "Bar Chart": self._add_bar_traces,
-            "Pie Chart": self._add_pie_traces,
-            "Histogram": self._add_histogram_traces,
-            "Box Plot": self._add_box_traces,
-            "Violin Plot": self._add_violin_traces,
-            "Strip Plot": self._add_strip_traces,
-            "Density Contour": self._add_density_contour_traces,
-            "Distribution Plot (Distplot)": self._add_distplot_traces,
+            "Scatter Plot": self._add_scatter_traces, "Line Plot": self._add_line_traces,
+            "Bar Chart": self._add_bar_traces, "Pie Chart": self._add_pie_traces,
+            "Histogram": self._add_histogram_traces, "Box Plot": self._add_box_traces,
+            "Violin Plot": self._add_violin_traces, "Strip Plot": self._add_strip_traces,
+            "Density Contour": self._add_density_contour_traces, "Distribution Plot (Distplot)": self._add_distplot_traces,
         }
 
         if plot_type in plot_trace_adders:
-            if plot_type in ["Bar Chart", "Pie Chart"]: # These might build customdata from aggregated_df
+            if plot_type in ["Bar Chart", "Pie Chart"]:
                  plot_trace_adders[plot_type](fig, df, basic_args, advanced_args, None, hover_data_config, row, col)
-            elif plot_type == "Distribution Plot (Distplot)": # Manages its own hover via ff
+            elif plot_type == "Distribution Plot (Distplot)":
                  plot_trace_adders[plot_type](fig, df, basic_args, advanced_args, None, [], row, col)
-            else: # Other plots use the pre-built customdata and hover_data_config
+            else:
                  plot_trace_adders[plot_type](fig, df, basic_args, advanced_args,
-                                           customdata_numpy_array,
-                                           hover_data_config, # Pass the full config
-                                           row, col)
+                                           customdata_numpy_array, hover_data_config, row, col)
 
     def _get_hovertemplate(self, df_for_trace, x_col_name, y_col_name, z_col_name, names_col_name, values_col_name, hover_data_config_list, plot_type, advanced_args):
-        # hover_data_config_list is a list of {'original_name': str, 'display_name': str}
         ht_parts = []
         
-        # Determine advanced_args source (generic, distplot, or pie)
-        # This part remains mostly the same, ensuring correct labels are picked up
         adv_args_source = {}
         if plot_type == "Distribution Plot (Distplot)":
             if self.distplot_advanced_group and self.distplot_advanced_group.isChecked():
                  adv_args_source = self.distplot_advanced_widgets
         elif self.advanced_group and self.advanced_group.isChecked():
             adv_args_source = self.advanced_config_widgets
-        # This was to get custom axis labels from advanced settings.
-        # Let's assume advanced_args passed in is already the correct one (e.g. self.distplot_advanced_widgets).
         
         adv_x_label = advanced_args.get('xaxis_label_edit', "")
         adv_y_label = advanced_args.get('yaxis_label_edit', "")
-        adv_z_label_widget = advanced_args.get('zaxis_label_edit', None) # For plots that might have it
-        adv_z_label = adv_z_label_widget if adv_z_label_widget else None # QLineEdit.text() if widget
+        adv_z_label_widget = advanced_args.get('zaxis_label_edit', None)
+        adv_z_label = adv_z_label_widget if adv_z_label_widget else None
         adv_legend_title = advanced_args.get('legend_title_edit', "")
 
 
@@ -1343,7 +1353,7 @@ class VisualWorkshopApp(QMainWindow):
         y_label = adv_y_label if adv_y_label else (y_col_name if y_col_name and y_col_name != "None" else "Y")
         z_label = adv_z_label if adv_z_label else (z_col_name if z_col_name and z_col_name != "None" else "Z")
         names_label = adv_legend_title if adv_legend_title else (names_col_name if names_col_name and names_col_name != "None" else "Name")
-        values_label = "Value" # Generic, can be improved if y_label context is clearer for pie values
+        values_label = "Value"
 
         def get_format_str(col_name_str, df_context):
             if col_name_str and col_name_str != "None" and col_name_str in df_context.columns:
@@ -1357,25 +1367,22 @@ class VisualWorkshopApp(QMainWindow):
         z_fmt = get_format_str(z_col_name, df_for_trace)
 
         if plot_type == "Pie Chart":
-            # Pie hovertemplate is usually %{label}, %{value}, %{percent}
-            # The hover_data_config might be for the aggregated data if customdata is built for it.
             if names_col_name and names_col_name != "None": ht_parts.append(f"<b>{names_label}</b>: %{{label}}<br>")
-            if values_col_name and values_col_name != "None": ht_parts.append(f"<b>{values_label}</b>: %{{value}}<br>") # %{value} refers to the pie slice value
+            if values_col_name and values_col_name != "None": ht_parts.append(f"<b>{values_label}</b>: %{{value}}<br>")
             ht_parts.append("<b>Percentage</b>: %{percent}<br>")
         elif plot_type == "Histogram" or plot_type == "Distribution Plot (Distplot)":
             x_axis_display_name_for_hover = x_label
             ht_parts.append(f"<b>{x_axis_display_name_for_hover} (bin)</b>: %{{x{x_fmt}}}<br>")
-            ht_parts.append(f"<b>Count/Density</b>: %{{y}}<br>") # %y is the histogram bar height
+            ht_parts.append(f"<b>Count/Density</b>: %{{y}}<br>")
         elif plot_type == "Density Contour":
             if x_col_name and x_col_name != "None": ht_parts.append(f"<b>{x_label}</b>: %{{x{x_fmt}}}<br>")
             if y_col_name and y_col_name != "None": ht_parts.append(f"<b>{y_label}</b>: %{{y{y_fmt}}}<br>")
             if z_col_name and z_col_name != "None" and z_col_name in df_for_trace.columns: ht_parts.append(f"<b>{z_label} (Value)</b>: %{{z{z_fmt}}}<br>")
-            else: ht_parts.append(f"<b>Density</b>: %{{z}}<br>") # %z is the density value
-        else: # Default for Scatter, Line, Bar, Box, Violin, Strip
+            else: ht_parts.append(f"<b>Density</b>: %{{z}}<br>")
+        else:
             if x_col_name and x_col_name != "None": ht_parts.append(f"<b>{x_label}</b>: %{{x{x_fmt}}}<br>")
             if y_col_name and y_col_name != "None": ht_parts.append(f"<b>{y_label}</b>: %{{y{y_fmt}}}<br>")
 
-        # Add customdata items using display_name for the label
         if hover_data_config_list:
             for i, item in enumerate(hover_data_config_list):
                 display_name = item['display_name']
@@ -1383,18 +1390,12 @@ class VisualWorkshopApp(QMainWindow):
 
         return "".join(ht_parts) + "<extra></extra>" if ht_parts else None
 
-    # Modify _handle_categorical_coloring_and_symboling to accept hover_data_config
-    # and rebuild customdata for slices based on original_names from that config.
     def _handle_categorical_coloring_and_symboling(self, fig, df, trace_constructor, base_plotly_args,
                                                  color_by_col, symbol_by_col, plot_type,
-                                                 # customdata_array_for_df, # Full df customdata (if no cat splitting)
-                                                 # ordered_col_names_for_customdata, # Now replaced by hover_data_config
-                                                 hover_data_config, # List of {'original_name', 'display_name'}
-                                                 row, col, pattern_by_col=None, bar_pattern_shapes=None): # Added pattern args
+                                                 hover_data_config, row, col, pattern_by_col=None, bar_pattern_shapes=None):
 
         color_palette = px.colors.qualitative.Plotly
         symbol_sequence = ['circle', 'square', 'diamond', 'cross', 'x', 'triangle-up', 'star', 'hexagram', 'pentagon']
-        # Bar pattern shapes moved to _add_bar_traces call for more control
 
         has_color_cat = color_by_col != "None" and color_by_col in df.columns and df.schema[color_by_col] in [pl.Utf8, pl.Categorical, pl.Boolean]
         has_symbol_cat = symbol_by_col != "None" and symbol_by_col in df.columns and df.schema[symbol_by_col] in [pl.Utf8, pl.Categorical, pl.Boolean]
@@ -1406,9 +1407,8 @@ class VisualWorkshopApp(QMainWindow):
 
         original_x_series_name = get_series_name(base_plotly_args.get('x'))
         original_y_series_name = get_series_name(base_plotly_args.get('y'))
-        original_z_series_name = get_series_name(base_plotly_args.get('z')) # etc.
+        original_z_series_name = get_series_name(base_plotly_args.get('z'))
 
-        # Helper to build customdata for a slice
         def build_slice_customdata(slice_df, hover_conf):
             if not hover_conf or slice_df.is_empty():
                 return None
@@ -1424,13 +1424,11 @@ class VisualWorkshopApp(QMainWindow):
 
 
         if has_color_cat and has_pattern_cat and color_by_col != pattern_by_col and plot_type == "Bar Chart":
-            # Complex case: color and pattern are different categorical dimensions for Bar Chart
             unique_colors = df.get_column(color_by_col).unique().drop_nulls().sort().to_list()
             unique_patterns = df.get_column(pattern_by_col).unique().drop_nulls().sort().to_list()
 
             for i, color_val in enumerate(unique_colors):
                 for j, pattern_val in enumerate(unique_patterns):
-                    # Filter df for this specific color AND pattern combination
                     combined_slice_df = df.filter(
                         (pl.col(color_by_col) == color_val) & (pl.col(pattern_by_col) == pattern_val)
                     )
@@ -1439,26 +1437,24 @@ class VisualWorkshopApp(QMainWindow):
 
                     slice_customdata_np = build_slice_customdata(combined_slice_df, hover_data_config)
                     
-                    trace_args_for_slice = {k: v for k, v in base_plotly_args.items()} # Copy base
+                    trace_args_for_slice = {k: v for k, v in base_plotly_args.items()}
                     trace_args_for_slice['marker'] = base_plotly_args.get('marker', {}).copy()
                     trace_args_for_slice['showlegend'] = True
-                    trace_args_for_slice['name'] = f"{color_val} ({pattern_val})" # Combined name
-                    trace_args_for_slice['legendgroup'] = str(color_val) # Group by color primarily in legend
+                    trace_args_for_slice['name'] = f"{color_val} ({pattern_val})"
+                    trace_args_for_slice['legendgroup'] = str(color_val)
 
                     trace_args_for_slice['marker']['color'] = color_palette[i % len(color_palette)]
-                    if bar_pattern_shapes: # Should be passed for Bar Chart
+                    if bar_pattern_shapes:
                          trace_args_for_slice['marker']['pattern'] = {'shape': bar_pattern_shapes[j % len(bar_pattern_shapes)], 'solidity': 0.3}
 
 
-                    # Update x, y from the combined_slice_df
                     if original_x_series_name and original_x_series_name in combined_slice_df.columns: trace_args_for_slice['x'] = combined_slice_df[original_x_series_name]
                     if original_y_series_name and original_y_series_name in combined_slice_df.columns: trace_args_for_slice['y'] = combined_slice_df[original_y_series_name]
                     
                     fig.add_trace(trace_constructor(**trace_args_for_slice, customdata=slice_customdata_np), row=row, col=col)
-            return # Handled complex bar case
+            return
 
 
-        # Simpler cases (color OR symbol OR pattern if color==pattern)
         cat_col_to_iterate = None
         unique_values_list = []
         is_iterating_color, is_iterating_symbol, is_iterating_pattern = False, False, False
@@ -1468,12 +1464,12 @@ class VisualWorkshopApp(QMainWindow):
             unique_values_list = df.get_column(color_by_col).unique().drop_nulls().sort().to_list()
             is_iterating_color = True
             if has_pattern_cat and color_by_col == pattern_by_col and plot_type == "Bar Chart":
-                is_iterating_pattern = True # Color and pattern are the same column
-        elif has_symbol_cat: # No color_cat, or color_cat is not categorical
+                is_iterating_pattern = True
+        elif has_symbol_cat:
             cat_col_to_iterate = symbol_by_col
             unique_values_list = df.get_column(symbol_by_col).unique().drop_nulls().sort().to_list()
             is_iterating_symbol = True
-        elif has_pattern_cat and plot_type == "Bar Chart": # Only pattern, no color or symbol
+        elif has_pattern_cat and plot_type == "Bar Chart":
             cat_col_to_iterate = pattern_by_col
             unique_values_list = df.get_column(pattern_by_col).unique().drop_nulls().sort().to_list()
             is_iterating_pattern = True
@@ -1494,32 +1490,29 @@ class VisualWorkshopApp(QMainWindow):
 
                 if is_iterating_color:
                     trace_args_for_slice['marker']['color'] = color_palette[idx % len(color_palette)]
-                if is_iterating_symbol: # Can be combined with color if color is continuous
+                if is_iterating_symbol:
                     trace_args_for_slice['marker']['symbol'] = symbol_sequence[idx % len(symbol_sequence)]
-                if is_iterating_pattern and bar_pattern_shapes: # Only for bar, and if iterating the pattern col
+                if is_iterating_pattern and bar_pattern_shapes:
                     trace_args_for_slice['marker']['pattern'] = {'shape': bar_pattern_shapes[idx % len(bar_pattern_shapes)], 'solidity': 0.3}
 
 
                 if original_x_series_name and original_x_series_name in df_slice.columns: trace_args_for_slice['x'] = df_slice[original_x_series_name]
                 if original_y_series_name and original_y_series_name in df_slice.columns: trace_args_for_slice['y'] = df_slice[original_y_series_name]
-                # ... and for z, labels, values etc. if applicable ...
 
                 fig.add_trace(trace_constructor(**trace_args_for_slice, customdata=slice_customdata_np), row=row, col=col)
-        else: # No categorical splitting, or conditions not met for iteration
-            # Build customdata for the whole df
+        else:
             full_df_customdata_np = build_slice_customdata(df, hover_data_config)
             
             final_args = base_plotly_args.copy()
-            # Set default name if not provided
             if 'name' not in final_args:
                 if original_y_series_name and original_y_series_name != "None":
                     final_args['name'] = original_y_series_name
-                elif original_x_series_name and original_x_series_name != "None": # e.g. for Histogram
+                elif original_x_series_name and original_x_series_name != "None":
                     final_args['name'] = original_x_series_name
             
             if final_args.get('name') is not None and final_args.get('name') != "None":
                  final_args['showlegend'] = True
-            else: # If name is None or "None", hide from legend unless explicitly shown elsewhere
+            else:
                  if 'showlegend' not in final_args: final_args['showlegend'] = False
 
 
@@ -1527,8 +1520,6 @@ class VisualWorkshopApp(QMainWindow):
 
 
     def _add_scatter_traces(self, fig, df, basic_args, advanced_args, customdata_numpy_array_ignored, hover_data_config, row, col):
-        # customdata_numpy_array_ignored because _handle_categorical_coloring_and_symboling will build it per slice or for full df
-        # hover_data_config is the new structure: list of {'original_name': str, 'display_name': str}
         x_col, y_col = basic_args.get('x_col'), basic_args.get('y_col')
         color_col, size_col, symbol_col = basic_args.get('color_col'), basic_args.get('size_col'), basic_args.get('symbol_col')
 
@@ -1546,7 +1537,6 @@ class VisualWorkshopApp(QMainWindow):
             plotly_args["marker"]["colorbar"] = {"title": user_legend_title if user_legend_title else color_col}
 
         if size_col != "None" and size_col in df.columns:
-            # ... (size logic unchanged) ...
             size_data_orig = df.get_column(size_col).fill_null(0).cast(pl.Float64)
             min_s_orig = size_data_orig.min()
             if min_s_orig is None: min_s_orig = 0.0
@@ -1562,14 +1552,14 @@ class VisualWorkshopApp(QMainWindow):
 
 
         if symbol_col != "None" and symbol_col in df.columns and not (df.schema[symbol_col] in [pl.Utf8, pl.Categorical, pl.Boolean]):
-             plotly_args["marker"]["symbol"] = df.get_column(symbol_col) # For continuous symbol (numeric mapped to symbol codes) - less common
+             plotly_args["marker"]["symbol"] = df.get_column(symbol_col)
 
         plotly_args["hovertemplate"] = self._get_hovertemplate(df, x_col, y_col, None, None, None, hover_data_config, "Scatter Plot", advanced_args)
 
         self._handle_categorical_coloring_and_symboling(
             fig, df, go.Scatter, plotly_args,
             color_col, symbol_col, "Scatter Plot",
-            hover_data_config, # Pass the new hover_data_config
+            hover_data_config,
             row, col
         )
 
@@ -1584,14 +1574,10 @@ class VisualWorkshopApp(QMainWindow):
         if sort_x and x_col in plot_df.columns:
             plot_df = plot_df.sort(x_col)
         
-        # If plot_df changed due to sorting, customdata needs to be built on this sorted df.
-        # This is handled inside _handle_categorical_coloring_and_symboling by its build_slice_customdata.
-
         plotly_args = {"x": plot_df.get_column(x_col), "y": plot_df.get_column(y_col), "mode": "lines+markers"}
         plotly_args["marker"] = {}
 
         if color_col != "None" and color_col in plot_df.columns and not (plot_df.schema[color_col] in [pl.Utf8, pl.Categorical, pl.Boolean]):
-            # ... (continuous color logic unchanged) ...
             plotly_args["marker"]["color"] = plot_df.get_column(color_col)
             csc = advanced_args.get('color_continuous_scale_combo', "None")
             if csc != "None": plotly_args["marker"]["colorscale"] = csc
@@ -1608,7 +1594,7 @@ class VisualWorkshopApp(QMainWindow):
         self._handle_categorical_coloring_and_symboling(
             fig, plot_df, go.Scatter, plotly_args,
             color_col, symbol_col, "Line Plot",
-            hover_data_config, # Pass new hover_data_config
+            hover_data_config,
             row, col
         )
 
@@ -1618,7 +1604,7 @@ class VisualWorkshopApp(QMainWindow):
         agg_func, orientation = basic_args.get('agg_func'), basic_args.get('orientation')
         barmode = basic_args.get('barmode', 'group').lower()
 
-        bar_pattern_shapes = ['/', '\\', 'x', '-', '|', '+', '.'] # Available patterns
+        bar_pattern_shapes = ['/', '\\', 'x', '-', '|', '+', '.']
 
         if x_col == "None" or x_col not in df.columns or df.is_empty(): return
 
@@ -1632,7 +1618,7 @@ class VisualWorkshopApp(QMainWindow):
 
         is_pattern_categorical_for_grouping = pattern_col != "None" and pattern_col in plot_df_for_agg.columns and \
                                            plot_df_for_agg.schema[pattern_col] in [pl.Utf8, pl.Categorical, pl.Boolean]
-        if is_pattern_categorical_for_grouping and pattern_col not in group_by_cols: # Avoid duplicate group key
+        if is_pattern_categorical_for_grouping and pattern_col not in group_by_cols:
             group_by_cols.append(pattern_col)
 
 
@@ -1641,42 +1627,34 @@ class VisualWorkshopApp(QMainWindow):
         y_col_for_hovertemplate = y_col
 
         if y_col != "None" and y_col in plot_df_for_agg.columns:
-            # Ensure y_col is float for aggregation if it's not the 'count' agg
             if agg_func != "count":
                 plot_df_for_agg = plot_df_for_agg.with_columns(pl.col(y_col).cast(pl.Float64, strict=False))
             
             agg_map_polars = {
-                "sum": pl.sum(y_col).alias(y_values_col_name_internal),
-                "mean": pl.mean(y_col).alias(y_values_col_name_internal),
-                "median": pl.median(y_col).alias(y_values_col_name_internal),
-                "min": pl.min(y_col).alias(y_values_col_name_internal),
-                "max": pl.max(y_col).alias(y_values_col_name_internal),
-                "first": pl.first(y_col).alias(y_values_col_name_internal),
+                "sum": pl.sum(y_col).alias(y_values_col_name_internal), "mean": pl.mean(y_col).alias(y_values_col_name_internal),
+                "median": pl.median(y_col).alias(y_values_col_name_internal), "min": pl.min(y_col).alias(y_values_col_name_internal),
+                "max": pl.max(y_col).alias(y_values_col_name_internal), "first": pl.first(y_col).alias(y_values_col_name_internal),
                 "last": pl.last(y_col).alias(y_values_col_name_internal),
             }
             if agg_func == "count":
                 expressions_for_agg.append(pl.len().alias(y_values_col_name_internal))
             elif agg_func in agg_map_polars:
                 expressions_for_agg.append(agg_map_polars[agg_func])
-            else: # Fallback, should not happen
+            else:
                 expressions_for_agg.append(pl.len().alias(y_values_col_name_internal))
-            y_col_for_hovertemplate = y_values_col_name_internal # Use alias for hover
-        else: # No y_col selected, count occurrences
+            y_col_for_hovertemplate = y_values_col_name_internal
+        else:
             y_values_col_name_internal = "_vw_count_y_val_"
             expressions_for_agg.append(pl.len().alias(y_values_col_name_internal))
             y_col_for_hovertemplate = y_values_col_name_internal
 
-        # Add aggregations for hover columns (use 'first' for non-numeric hover data on aggregated results)
         processed_hover_cols_agg = []
         if hover_data_config:
             for item in hover_data_config:
                 h_col_name = item['original_name']
                 if h_col_name in plot_df_for_agg.columns and h_col_name not in group_by_cols and h_col_name != y_col:
-                    # If not a group key and not the Y being aggregated, take the first value.
-                    # This is a simplification; for truly representative hover data on aggregated plots,
-                    # the aggregation method for hover columns might need to be user-configurable too.
                     expressions_for_agg.append(pl.first(h_col_name).alias(h_col_name))
-                    processed_hover_cols_agg.append(item) # Keep this for hovertemplate
+                    processed_hover_cols_agg.append(item)
         
         aggregated_plot_df = plot_df_for_agg.group_by(group_by_cols, maintain_order=True).agg(
             expressions_for_agg
@@ -1684,11 +1662,10 @@ class VisualWorkshopApp(QMainWindow):
 
         actual_y_col_name_in_agg_df = y_values_col_name_internal
 
-        # Set barmode in layout (Plotly Express often does this)
         if is_color_categorical_for_grouping or is_pattern_categorical_for_grouping :
             fig.update_layout(barmode=barmode)
         else:
-            fig.update_layout(barmode='group') # Default if no categorical color/pattern
+            fig.update_layout(barmode='group')
 
         bar_args = {}
         bar_args['x' if orientation == "Vertical" else 'y'] = aggregated_plot_df.get_column(x_col)
@@ -1696,52 +1673,39 @@ class VisualWorkshopApp(QMainWindow):
         bar_args["orientation"] = 'v' if orientation == "Vertical" else 'h'
         bar_args["marker"] = {}
 
-        # Continuous coloring for bars (if color_col is not for categorical grouping)
         if color_col != "None" and color_col in aggregated_plot_df.columns and not is_color_categorical_for_grouping:
             if not (aggregated_plot_df.schema[color_col] in [pl.Utf8, pl.Categorical, pl.Boolean]):
                 bar_args["marker"]["color"] = aggregated_plot_df.get_column(color_col)
-                # ... (colorscale, colorbar logic as before) ...
                 csc = advanced_args.get('color_continuous_scale_combo', "None")
                 if csc != "None": bar_args["marker"]["colorscale"] = csc
                 bar_args["marker"]["showscale"] = True
                 user_legend_title = advanced_args.get('legend_title_edit')
                 bar_args["marker"]["colorbar"] = {"title": user_legend_title if user_legend_title else color_col}
 
-        # The hover_data_config for bars should refer to columns in aggregated_plot_df.
-        # `processed_hover_cols_agg` contains items whose original_name exists in aggregated_plot_df.
         bar_args["hovertemplate"] = self._get_hovertemplate(
             aggregated_plot_df, x_col, actual_y_col_name_in_agg_df, None, None, None,
-            processed_hover_cols_agg, # Use the hover config relevant to aggregated data
-            "Bar Chart", advanced_args
+            processed_hover_cols_agg, "Bar Chart", advanced_args
         )
         
-        # Determine effective color and pattern columns for the handler
         color_col_for_handler = color_col if is_color_categorical_for_grouping else "None"
         pattern_col_for_handler = pattern_col if is_pattern_categorical_for_grouping else "None"
 
 
         self._handle_categorical_coloring_and_symboling(
             fig, aggregated_plot_df, go.Bar, bar_args,
-            color_col_for_handler, 
-            "None", # Symbol not typical for bars
-            "Bar Chart",
-            processed_hover_cols_agg, # Pass hover config for aggregated data
-            row, col,
-            pattern_by_col=pattern_col_for_handler, # Pass pattern column
-            bar_pattern_shapes=bar_pattern_shapes  # Pass available shapes
+            color_col_for_handler, "None", "Bar Chart",
+            processed_hover_cols_agg, row, col,
+            pattern_by_col=pattern_col_for_handler, bar_pattern_shapes=bar_pattern_shapes
         )
 
 
     def _add_pie_traces(self, fig, df, basic_args, advanced_args, _customdata_ignored, hover_data_config_ignored, row, col):
-        # Pie charts usually don't use the generic hover_data_config system in the same way,
-        # as hover info is typically 'label', 'value', 'percent'.
-        # If customdata were to be used, it would be on the aggregated `plot_df`.
         names_col = basic_args.get('names_col')
         pie_mode = basic_args.get('pie_mode', "Count Occurrences (Rows)")
         values_col_for_sum_name = basic_args.get('values_col')
         hole = basic_args.get('hole_size', 0) / 100.0
         
-        textinfo = basic_args.get('textinfo', 'percent+label') # Assuming textinfo, sort, direction from basic/advanced
+        textinfo = basic_args.get('textinfo', 'percent+label')
         sort_slices = basic_args.get('sort_pie', True)
         direction = basic_args.get('direction', 'clockwise')
 
@@ -1751,7 +1715,6 @@ class VisualWorkshopApp(QMainWindow):
         slice_line_width = advanced_args.get('slice_line_width_spin', 1)
 
         if names_col == "None" or names_col not in df.columns or df.is_empty():
-            # ... (error annotation) ...
             return
 
         plot_df = None
@@ -1762,53 +1725,33 @@ class VisualWorkshopApp(QMainWindow):
             actual_values_col_name_for_trace = "count"
         elif pie_mode == "Sum Values from Column":
             if values_col_for_sum_name == "None" or values_col_for_sum_name not in df.columns:
-                # ... (error annotation) ...
                 return
             try:
                 df_for_sum = df.with_columns(pl.col(values_col_for_sum_name).cast(pl.Float64, strict=False))
                 plot_df = df_for_sum.group_by(names_col).agg(pl.sum(values_col_for_sum_name).alias("summed_values")).sort(names_col)
                 actual_values_col_name_for_trace = "summed_values"
             except Exception as e:
-                # ... (error annotation) ...
                 return
         
         if plot_df is None or plot_df.is_empty() or actual_values_col_name_for_trace not in plot_df.columns:
-             # ... (error annotation if plot_df is bad) ...
             return
 
-        # Pie customdata (if needed) would be built from plot_df here.
-        # For simplicity, sticking to standard pie hover.
-        # final_ordered_hover_names_for_customdata_pie = []
-        # customdata_numpy_for_pie = None
-        # if hover_data_config_ignored (passed as arg) and not plot_df.is_empty():
-        #    ... build customdata_numpy_for_pie from plot_df based on hover_data_config_ignored ...
-        #    ... and populate final_ordered_hover_names_for_customdata_pie ...
-
         pull_values = None
-        # ... (pull_values logic) ...
         marker_options = {}
-        # ... (marker_options logic for slice_colors, slice_line) ...
 
         fig.add_trace(go.Pie(
             labels=plot_df.get_column(names_col),
             values=plot_df.get_column(actual_values_col_name_for_trace),
-            hole=hole,
-            textinfo=textinfo if textinfo != "none" else None,
-            sort=sort_slices,
-            direction=direction,
-            pull=pull_values,
-            marker=marker_options if marker_options else None,
-            name="", # Typically pies don't have a series name in legend unless multiple pies
-            hovertemplate = self._get_hovertemplate( # Pass plot_df for context
+            hole=hole, textinfo=textinfo if textinfo != "none" else None,
+            sort=sort_slices, direction=direction, pull=pull_values,
+            marker=marker_options if marker_options else None, name="",
+            hovertemplate = self._get_hovertemplate(
                 plot_df, None, None, None, names_col, actual_values_col_name_for_trace,
-                [], # Empty list as standard pie hover used
-                "Pie Chart", advanced_args
+                [], "Pie Chart", advanced_args
             ),
-            # customdata=customdata_numpy_for_pie # If implementing custom hover for pie
         ), row=row, col=col)
 
     def _add_histogram_traces(self, fig, df, basic_args, advanced_args, customdata_numpy_array_ignored, hover_data_config, row, col):
-        # ... (similar to scatter/line, use hover_data_config for _handle_categorical_coloring_and_symboling)
         x_col, y_col = basic_args.get('x_col'), basic_args.get('y_col')
         color_col = basic_args.get('color_col')
         nbinsx = basic_args.get('nbinsx', 0)
@@ -1818,31 +1761,22 @@ class VisualWorkshopApp(QMainWindow):
         if x_col == "None" or x_col not in df.columns or df.is_empty(): return
 
         plotly_args = {"x": df.get_column(x_col)}
-        if y_col != "None" and y_col in df.columns: plotly_args["y"] = df.get_column(y_col) # weights
+        if y_col != "None" and y_col in df.columns: plotly_args["y"] = df.get_column(y_col)
 
         if nbinsx > 0: plotly_args["nbinsx"] = nbinsx
         if histnorm != "None": plotly_args["histnorm"] = histnorm.lower().replace(" ", "")
         if cumulative_enabled: plotly_args["cumulative"] = {"enabled": True}
         
-        plotly_args["marker"] = {} # For potential categorical coloring
-        # For histogram, hovertemplate typically shows x (bin range) and y (count/density).
-        # Customdata can add more info about the *points that fall into the bin*, but go.Histogram
-        # itself doesn't directly support customdata for this level of detail in hover.
-        # Plotly Express histograms achieve this by pre-binning and then using go.Bar with customdata.
-        # For now, stick to standard histogram hover.
+        plotly_args["marker"] = {}
         plotly_args["hovertemplate"] = self._get_hovertemplate(df, x_col, y_col, None,None,None, [], "Histogram", advanced_args)
 
 
         self._handle_categorical_coloring_and_symboling(
             fig, df, go.Histogram, plotly_args,
-            color_col, "None", # Symbol not applicable
-            "Histogram",
-            hover_data_config, # Pass hover_data_config (though might not be fully used by go.Histogram hover)
-            row, col
+            color_col, "None", "Histogram", hover_data_config, row, col
         )
 
     def _add_box_traces(self, fig, df, basic_args, advanced_args, customdata_numpy_array_ignored, hover_data_config, row, col):
-        # ... (similar pattern, use hover_data_config)
         x_col, y_col = basic_args.get('x_col'), basic_args.get('y_col')
         color_col = basic_args.get('color_col')
         boxpoints, orientation, notched = basic_args.get('boxpoints'), basic_args.get('orientation'), basic_args.get('notched')
@@ -1859,7 +1793,7 @@ class VisualWorkshopApp(QMainWindow):
             plotly_args['y'] = main_val_col_series
             if group_col_series is not None: plotly_args['x'] = group_col_series
             ht_y_label, ht_x_label = y_col, group_col_name
-        else: # Horizontal
+        else:
             plotly_args['x'] = main_val_col_series
             if group_col_series is not None: plotly_args['y'] = group_col_series
             ht_x_label, ht_y_label = y_col, group_col_name
@@ -1870,15 +1804,10 @@ class VisualWorkshopApp(QMainWindow):
         plotly_args["hovertemplate"] = self._get_hovertemplate(df, ht_x_label, ht_y_label, None,None,None, hover_data_config, "Box Plot", advanced_args)
 
         self._handle_categorical_coloring_and_symboling(
-            fig, df, go.Box, plotly_args,
-            color_col, "None", 
-            "Box Plot",
-            hover_data_config,
-            row, col
+            fig, df, go.Box, plotly_args, color_col, "None", "Box Plot", hover_data_config, row, col
         )
 
     def _add_violin_traces(self, fig, df, basic_args, advanced_args, customdata_numpy_array_ignored, hover_data_config, row, col):
-        # ... (similar pattern, use hover_data_config)
         x_col, y_col = basic_args.get('x_col'), basic_args.get('y_col')
         color_col = basic_args.get('color_col')
         box_visible, points, orientation = basic_args.get('box_visible'), basic_args.get('points'), basic_args.get('orientation')
@@ -1896,7 +1825,7 @@ class VisualWorkshopApp(QMainWindow):
             plotly_args['y'] = main_val_col_series
             if group_col_series is not None: plotly_args['x'] = group_col_series
             ht_y_label, ht_x_label = y_col, group_col_name
-        else: # Horizontal
+        else:
             plotly_args['x'] = main_val_col_series
             if group_col_series is not None: plotly_args['y'] = group_col_series
             ht_x_label, ht_y_label = y_col, group_col_name
@@ -1906,26 +1835,16 @@ class VisualWorkshopApp(QMainWindow):
         plotly_args["hovertemplate"] = self._get_hovertemplate(df, ht_x_label, ht_y_label, None,None,None, hover_data_config, "Violin Plot", advanced_args)
 
         if split_by_col != "None" and split_by_col in df.columns:
-            # ... (split violin logic needs careful customdata handling per split) ...
-            # For brevity, this part is simplified. A full implementation would build customdata for df1 and df2.
             unique_split_values = df.get_column(split_by_col).drop_nulls().unique().to_list()
             if len(unique_split_values) == 2:
-                # ... (split trace creation, ensuring customdata is passed for each) ...
-                # This part is complex and omitted for brevity here but would follow the pattern of
-                # filtering df, building customdata for the slice, and adding trace.
                 self.statusBar().showMessage("Split violin with full custom hover not fully shown in this snippet.", 2000)
 
 
         self._handle_categorical_coloring_and_symboling(
-            fig, df, go.Violin, plotly_args,
-            color_col, "None",
-            "Violin Plot",
-            hover_data_config,
-            row, col
+            fig, df, go.Violin, plotly_args, color_col, "None", "Violin Plot", hover_data_config, row, col
         )
 
     def _add_strip_traces(self, fig, df, basic_args, advanced_args, customdata_numpy_array_ignored, hover_data_config, row, col):
-        # ... (similar pattern, use hover_data_config)
         x_col, y_col = basic_args.get('x_col'), basic_args.get('y_col')
         color_col, orientation = basic_args.get('color_col'), basic_args.get('orientation')
 
@@ -1941,7 +1860,7 @@ class VisualWorkshopApp(QMainWindow):
             plotly_args['y'] = main_val_col_series
             if group_col_series is not None: plotly_args['x'] = group_col_series
             ht_y_label, ht_x_label = y_col, group_col_name
-        else: # Horizontal
+        else:
             plotly_args['x'] = main_val_col_series
             if group_col_series is not None: plotly_args['y'] = group_col_series
             ht_x_label, ht_y_label = y_col, group_col_name
@@ -1951,15 +1870,10 @@ class VisualWorkshopApp(QMainWindow):
         plotly_args["hovertemplate"] = self._get_hovertemplate(df, ht_x_label, ht_y_label, None,None,None, hover_data_config, "Strip Plot", advanced_args)
         
         self._handle_categorical_coloring_and_symboling(
-            fig, df, go.Scatter, plotly_args, # Strip is go.Scatter
-            color_col, "None",
-            "Strip Plot",
-            hover_data_config,
-            row, col
+            fig, df, go.Scatter, plotly_args, color_col, "None", "Strip Plot", hover_data_config, row, col
         )
 
     def _add_density_contour_traces(self, fig, df, basic_args, advanced_args, customdata_numpy_array_ignored, hover_data_config, row, col):
-        # ... (similar pattern, use hover_data_config)
         x_col, y_col, z_col = basic_args.get('x_col'), basic_args.get('y_col'), basic_args.get('z_col')
         
         if x_col == "None" or y_col == "None" or x_col not in df.columns or y_col not in df.columns or df.is_empty(): return
@@ -1974,8 +1888,6 @@ class VisualWorkshopApp(QMainWindow):
         user_legend_title = advanced_args.get('legend_title_edit')
         plotly_args["colorbar"] = {"title": user_legend_title if user_legend_title else (z_col if z_col!="None" else "Density")}
         
-        # Build customdata for density contour using the hover_data_config
-        # This is passed to customdata argument of the trace.
         final_customdata_for_density = None
         if hover_data_config and not df.is_empty():
             select_exprs = []
@@ -1995,28 +1907,16 @@ class VisualWorkshopApp(QMainWindow):
 
 
     def _add_distplot_traces(self, fig, df, basic_args, advanced_args_dist, customdata_ignored, hover_config_ignored, row, col):
-        # advanced_args_dist is self.distplot_advanced_widgets content
-        # Distplot manages its own hover.
-        # ... (implementation remains largely the same as before, no major changes for these specific requests, as hover is figure_factory internal) ...
-        # ... just ensure subtitle from advanced_args_dist is handled in _apply_advanced_layout ...
         hist_data_cols_selected = basic_args.get('hist_data_cols_list', [])
         curve_type = basic_args.get('curve_type', "kde")
         show_hist = basic_args.get('show_hist', True)
         show_rug = basic_args.get('show_rug', True)
         bin_size_str = basic_args.get('bin_size', "")
-        
-        # distplot_adv_args = advanced_args_dist # Already passed as advanced_args_dist
 
         if not hist_data_cols_selected or df.is_empty():
             fig.add_annotation(text="No data columns selected for distplot.", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False)
             return
         
-        # ... (rest of the distplot logic from the original file, including temporal handling and binning) ...
-        # Type checking, data prep (hist_data_values, group_labels, rug_text_data, reference_date)
-        # Bin size calculation (final_bin_size_param)
-        # ff.create_distplot call and layout updates specific to distplot
-        # This is a large block, assuming it's mostly correct from previous version.
-        # Key is that hover_config_ignored is used because ff handles its own.
         first_col_name = hist_data_cols_selected[0]
         if first_col_name not in df.columns:
             fig.add_annotation(text=f"Column '{first_col_name}' not found.", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False); return
@@ -2046,7 +1946,7 @@ class VisualWorkshopApp(QMainWindow):
                 hist_data_values.append(series.to_list())
                 rug_text_data.append(series.cast(str).to_list())
         if not hist_data_values: fig.add_annotation(text="Selected columns empty/null after processing.",showarrow=False); return
-        final_bin_size_param = [] # Logic for bin_size_str to final_bin_size_param from original
+        final_bin_size_param = []
         if bin_size_str.strip():
             try:
                 bin_count = int(bin_size_str)
@@ -2060,7 +1960,7 @@ class VisualWorkshopApp(QMainWindow):
                         final_bin_size_param = parsed_list * len(hist_data_values) if len(parsed_list) == 1 and len(hist_data_values) > 1 else parsed_list
                     else: final_bin_size_param = [float(bin_size_str)] * len(hist_data_values)
                 except ValueError: self.statusBar().showMessage("Invalid bin size. Auto.", 2000); final_bin_size_param = []
-        else: # Default: ~10 bins
+        else:
             final_bin_size_param = [((max(d_list) - min(d_list)) / 10.0) if len(d_list) > 1 and max(d_list) > min(d_list) else 0.01 for d_list in hist_data_values]
         
         if row is not None or col is not None: fig.add_annotation(text="Distplot not supported in faceting.", row=row,col=col,showarrow=False); return
@@ -2069,49 +1969,27 @@ class VisualWorkshopApp(QMainWindow):
         
         try:
             dist_fig_ff = ff.create_distplot(hist_data_values, group_labels, show_hist=show_hist, show_rug=show_rug, bin_size=final_bin_size_param, curve_type=curve_type if curve_type != "None" else None, colors=colors_arg, rug_text=rug_text_data if show_rug else None)
-            fig.data = [] # Clear existing traces before adding new ones
+            fig.data = []
             for trace_data in dist_fig_ff.data: fig.add_trace(trace_data)
-            fig.layout = dist_fig_ff.layout # Start with ff layout
-            # Apply user overrides from advanced_args_dist (handled in _apply_advanced_layout)
+            fig.layout = dist_fig_ff.layout
         except Exception as e:
             fig.add_annotation(text=f"Error creating distplot: {str(e)}",showarrow=False); print(f"Distplot error: {e}\n{traceback.format_exc()}")
 
     def _markdown_to_plotly_html(self, md_text):
-        """
-        Converts a simple subset of Markdown to HTML suitable for Plotly annotations.
-        Supports:
-        - Headers: #, ##, ### (becomes bold + line break, size adjusted)
-        - Bold: **text** or __text__
-        - Italic: *text* or _text_
-        - Newlines: converted to <br>
-        """
         if not md_text:
             return ""
 
         html_text = md_text
 
-        # 1. Newlines (most important to do first or they interfere with line-based regex)
         html_text = html_text.replace('\r\n', '<br>').replace('\n', '<br>')
-
-        # 2. Headers (process from most specific to least specific)
-        # H3: ### Header
         html_text = re.sub(r'^\s*###\s*(.*?)(<br>|$)', r'<span style="font-size: 1.0em; font-weight: bold;">\1</span>\2', html_text, flags=re.MULTILINE)
-        # H2: ## Header
         html_text = re.sub(r'^\s*##\s*(.*?)(<br>|$)', r'<span style="font-size: 1.1em; font-weight: bold;">\1</span>\2', html_text, flags=re.MULTILINE)
-        # H1: # Header
         html_text = re.sub(r'^\s*#\s*(.*?)(<br>|$)', r'<span style="font-size: 1.2em; font-weight: bold;">\1</span>\2', html_text, flags=re.MULTILINE)
-        
-        # 3. Bold: **text** or __text__
         html_text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', html_text)
-        html_text = re.sub(r'__(.*?)__', r'<b>\1</b>', html_text) # Handles __text__
-
-        # 4. Italic: *text* or _text_
-        # Need to be careful not to mess up bold if user did ***bold-italic*** or ___bold-italic___
-        # A simple approach that works for non-nested cases:
+        html_text = re.sub(r'__(.*?)__', r'<b>\1</b>', html_text)
         html_text = re.sub(r'\*(.*?)\*', r'<i>\1</i>', html_text)
-        html_text = re.sub(r'_(.*?)_', r'<i>\1</i>', html_text) # Handles _text_
+        html_text = re.sub(r'_(.*?)_', r'<i>\1</i>', html_text)
 
-        # Clean up potential leading/trailing <br> tags from empty lines or processing
         html_text = html_text.strip()
         while html_text.startswith("<br>"):
             html_text = html_text[4:].strip()
@@ -2122,57 +2000,35 @@ class VisualWorkshopApp(QMainWindow):
 
 
     def _apply_advanced_layout(self, fig, advanced_args, basic_args, plot_type, df_for_context):
-        # advanced_args is already the correct dict for the plot type
         layout_updates = {}
 
         title_text = advanced_args.get('plot_title_edit')
-        if not title_text: # Default title
+        if not title_text:
             title_text = f"{plot_type}"
             if hasattr(self, 'current_filename_hint') and self.current_filename_hint and self.current_filename_hint != "No data":
                 title_text += f" of {os.path.basename(self.current_filename_hint)}"
         layout_updates["title_text"] = title_text
         
-        # Subtitle - using annotation
         subtitle_markdown = advanced_args.get('subtitle_edit', "")
         if subtitle_markdown:
-            # Convert Markdown to Plotly-compatible HTML
             subtitle_html = self._markdown_to_plotly_html(subtitle_markdown)
 
             if fig.layout.annotations is None:
                 fig.layout.annotations = []
             
-            # Remove previous subtitle annotation to prevent duplicates on regeneration
             fig.layout.annotations = [ann for ann in fig.layout.annotations if ann.get('name') != '_subtitle_annotation_']
 
             fig.add_annotation(
-                text=subtitle_html,  # Use the converted HTML
-                xref="paper", yref="paper",
-                x=0.5, y=1.02, # Position above title (y=1.0 is top of plot area, y_pad might affect this)
-                               # For above title, y slightly > 1 related to title. Or adjust title's y.
-                               # A common subtitle position is below the title.
-                               # Let's try to place it right below the main title.
-                               # This may require adjusting the main title's 'y' position slightly down
-                               # or carefully positioning the annotation.
-                               # If title y is default (0.95-0.98), subtitle y around 0.90-0.93 might work.
-                               # Let's keep it above for now as per image.
-                showarrow=False,
-                align="center", 
-                # Font styling for the annotation block itself (e.g., default color if not in HTML)
-                # Individual HTML tags like <span> will override parts of this.
-                font=dict(color="dimgray"), # Default color for subtitle text not styled by HTML
-                xanchor="center", yanchor="bottom",
+                text=subtitle_html, xref="paper", yref="paper",
+                x=0.5, y=1.02, showarrow=False, align="center", 
+                font=dict(color="dimgray"), xanchor="center", yanchor="bottom",
                 name='_subtitle_annotation_' 
             )
-            # To ensure subtitle is above title and title doesn't overlap,
-            # we might need to adjust title's yanchor or layout margin.
-            # A simpler way is to make the main title part of the annotation if Plotly supported it well,
-            # or ensure enough top margin in the layout.
-            if "title_y" not in layout_updates: # if title y is not explicitly set
-                layout_updates["title_y"] = 0.95 # Push title slightly down if subtitle is present
+            if "title_y" not in layout_updates:
+                layout_updates["title_y"] = 0.95
                 layout_updates["title_yanchor"] = "top"
 
 
-        # X/Y axis labels, log, range, template logic
         x_col_name_for_label = basic_args.get('x_col')
         y_col_name_for_label = basic_args.get('y_col')
         
@@ -2183,7 +2039,6 @@ class VisualWorkshopApp(QMainWindow):
         elif plot_type == "Histogram" and (not fig.layout.yaxis or not fig.layout.yaxis.title or not fig.layout.yaxis.title.text):
              y_col_name_for_label = "Count / Density" 
         elif plot_type == "Distribution Plot (Distplot)":
-            # For distplot, labels are often set by ff, allow override if empty
             if not fig.layout.xaxis or not fig.layout.xaxis.title or not fig.layout.xaxis.title.text:
                  layout_updates["xaxis_title_text"] = advanced_args.get('xaxis_label_edit', "Value")
             if not fig.layout.yaxis or not fig.layout.yaxis.title or not fig.layout.yaxis.title.text:
@@ -2198,20 +2053,15 @@ class VisualWorkshopApp(QMainWindow):
         if final_y_label and plot_type != "Distribution Plot (Distplot)": layout_updates["yaxis_title_text"] = final_y_label
         
         if plot_type == "Distribution Plot (Distplot)": 
-            # Apply specific advanced labels for distplot if provided
             if adv_x_label: fig.layout.xaxis.title.text = adv_x_label
-            elif fig.layout.xaxis and (not fig.layout.xaxis.title or not fig.layout.xaxis.title.text): fig.layout.xaxis.title.text = "Value" # Default if empty
+            elif fig.layout.xaxis and (not fig.layout.xaxis.title or not fig.layout.xaxis.title.text): fig.layout.xaxis.title.text = "Value"
             
             if adv_y_label: fig.layout.yaxis.title.text = adv_y_label
-            elif fig.layout.yaxis and (not fig.layout.yaxis.title or not fig.layout.yaxis.title.text): fig.layout.yaxis.title.text = "Density" # Default if empty
+            elif fig.layout.yaxis and (not fig.layout.yaxis.title or not fig.layout.yaxis.title.text): fig.layout.yaxis.title.text = "Density"
 
             user_legend_title_dist = advanced_args.get('legend_title_edit')
             if user_legend_title_dist: fig.layout.legend.title.text = user_legend_title_dist
             elif fig.layout.legend and (not fig.layout.legend.title or not fig.layout.legend.title.text): fig.layout.legend.title.text = "Data Series"
-            
-            # Temporal axis formatting for distplot (if applicable, needs context from trace creation)
-            # This part is complex as it depends on `reference_date` and `hist_data_values` from trace creation
-            # For now, assume it's handled or needs more context if specific formatting is required here.
 
         if advanced_args.get('log_x_check', False): layout_updates["xaxis_type"] = "log"
         if advanced_args.get('log_y_check', False): layout_updates["yaxis_type"] = "log"
@@ -2231,7 +2081,6 @@ class VisualWorkshopApp(QMainWindow):
         template = advanced_args.get('template_combo', "None")
         if template != "None": layout_updates["template"] = template
 
-        # Legend/Colorbar Title
         user_legend_title = advanced_args.get('legend_title_edit')
         color_by_col_name = basic_args.get('color_col', "None")
         symbol_by_col_name = basic_args.get('symbol_col', "None") 
@@ -2257,27 +2106,23 @@ class VisualWorkshopApp(QMainWindow):
             if is_color_cont: 
                 if 'coloraxis' not in layout_updates: layout_updates['coloraxis'] = {}
                 if 'colorbar' not in layout_updates['coloraxis']: layout_updates['coloraxis']['colorbar'] = {}
-                layout_updates['coloraxis']['colorbar']['title_text'] = final_legend_title_text # Use title_text for colorbar
+                layout_updates['coloraxis']['colorbar']['title_text'] = final_legend_title_text
             else: 
                 layout_updates["legend_title_text"] = final_legend_title_text
         
-        # Apply layout updates
         if plot_type != "Distribution Plot (Distplot)":
             fig.update_layout(**layout_updates)
         else: 
-            # For distplot, apply specific updates as ff.create_distplot manages much of the layout
             if "title_text" in layout_updates: fig.layout.title.text = layout_updates["title_text"]
             if "title_y" in layout_updates: fig.layout.title.y = layout_updates["title_y"]
             if "title_yanchor" in layout_updates: fig.layout.title.yanchor = layout_updates["title_yanchor"]
 
             if "template" in layout_updates: fig.layout.template = layout_updates["template"]
-            # Log axes / ranges for distplot (apply cautiously)
             if "xaxis_type" in layout_updates and fig.layout.xaxis: fig.layout.xaxis.type = layout_updates["xaxis_type"]
             if "yaxis_type" in layout_updates and fig.layout.yaxis: fig.layout.yaxis.type = layout_updates["yaxis_type"]
             if "xaxis_range" in layout_updates and fig.layout.xaxis: fig.layout.xaxis.range = layout_updates["xaxis_range"]
             if "yaxis_range" in layout_updates and fig.layout.yaxis: fig.layout.yaxis.range = layout_updates["yaxis_range"]
 
-        # Color Discrete Map (applied per trace if categorical coloring)
         cdm_str = advanced_args.get('color_discrete_map_edit')
         if cdm_str:
             try:
@@ -2288,17 +2133,13 @@ class VisualWorkshopApp(QMainWindow):
                             if not hasattr(trace, 'marker') or trace.marker is None: 
                                 if isinstance(trace, go.Bar): trace.marker = go.bar.Marker()
                                 elif isinstance(trace, go.Scatter): trace.marker = go.scatter.Marker()
-                                # Add other trace types if necessary
                             if hasattr(trace, 'marker') and trace.marker is not None:
                                 trace.marker.color = color_discrete_map[trace.name]
             except Exception as e:
                 if hasattr(self, 'statusBar'): self.statusBar().showMessage(f"Invalid color discrete map format: {e}", 2000)
 
-        # Global Marker Symbol
         marker_symbol = advanced_args.get('marker_symbol_combo', "None")
         if marker_symbol != "None":
-            # This applies to all traces; careful if categorical symbols are also used.
-            # Best used when symbol_by is 'None' or continuous.
             fig.update_traces(marker_symbol=marker_symbol)
 
 
@@ -2309,29 +2150,25 @@ class VisualWorkshopApp(QMainWindow):
         if isinstance(widget, QCheckBox): return widget.isChecked()
         if isinstance(widget, QSpinBox): return widget.value()
         
-        # Handle the new distplot column selector (list of QCheckBoxes)
         if isinstance(widget, list) and all(isinstance(item, QCheckBox) for item in widget):
             return [cb.text() for cb in widget if cb.isChecked()]
             
-        # Handle the original QListWidget (if still used elsewhere, or for fallback)
         if isinstance(widget, QListWidget): 
             return [item.text() for item in widget.selectedItems()]
             
-        # For the hover_data_configs (dictionary of dictionaries) - retrieved specifically in generate_plot
-        # This function is for direct widget value retrieval.
         return None
 
     def closeEvent(self, event):
-        # ... (implementation unchanged) ...
+        # FIX: The temporary file is no longer used, so no cleanup is needed here.
         if hasattr(self.plot_view, 'stop'): self.plot_view.stop()
-        self.plot_view.setAttribute(Qt.WA_DeleteOnClose) # Important for WebEngineView
+        self.plot_view.setAttribute(Qt.WA_DeleteOnClose)
         super().closeEvent(event)
 
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
 
-    class DummyPickaxe: # Basic dummy for testing
+    class DummyPickaxe:
         def get_current_dataframe_for_vw(self):
             np.random.seed(42)
             n_rows = 120
@@ -2352,21 +2189,13 @@ if __name__ == '__main__':
         def get_current_filename_hint_for_vw(self):
             return "DummyData.csv"
         
-        # Add if Pickaxe has its own logger path
-        # def get_current_log_file_path(self): 
-        # return None # Or path to a log file
-
     dummy_pickaxe_instance = DummyPickaxe()
     window = VisualWorkshopApp(pickaxe_instance=dummy_pickaxe_instance)
     initial_df = dummy_pickaxe_instance.get_current_dataframe_for_vw()
     initial_hint = dummy_pickaxe_instance.get_current_filename_hint_for_vw()
     
-    # log_path_from_dummy = None
-    # if hasattr(dummy_pickaxe_instance, 'get_current_log_file_path'):
-    # log_path_from_dummy = dummy_pickaxe_instance.get_current_log_file_path()
-
     if initial_df is not None:
-         window.receive_dataframe(initial_df, initial_hint) # Pass log_path_from_dummy if available
+         window.receive_dataframe(initial_df, initial_hint)
 
     window.show()
     sys.exit(app.exec())
