@@ -298,7 +298,7 @@ class VisualWorkshopApp(QMainWindow):
         self.plot_type_combo.addItems([
             "Scatter Plot", "Line Plot", "Bar Chart", "Pie Chart",
             "Histogram", "Box Plot", "Violin Plot", "Strip Plot",
-            "Density Contour", "Distribution Plot (Distplot)"
+            "Density Contour", "Distribution Plot (Distplot)", "Time Series Plot"
         ])
         self.plot_type_combo.currentTextChanged.connect(self._update_plot_config_ui)
         plot_type_layout.addWidget(self.plot_type_combo)
@@ -401,6 +401,7 @@ class VisualWorkshopApp(QMainWindow):
             "Strip Plot": self._add_strip_config,
             "Density Contour": self._add_density_contour_config,
             "Distribution Plot (Distplot)": self._add_distplot_config,
+            "Time Series Plot": self._add_timeseries_config,
         }
         if plot_type in widget_adders:
             widget_adders[plot_type](layout)
@@ -685,6 +686,42 @@ class VisualWorkshopApp(QMainWindow):
         my_combo = self._add_widget_pair("Marginal Y:", QComboBox(), layout, self.basic_config_widgets, "marginal_y")
         my_combo.addItems(["None", "Histogram", "Rug", "Box", "Violin"])
 
+    def _add_timeseries_config(self, layout):
+        # Group into collapsible sections for better organization
+        core_group = CollapsibleGroupBox("Core Data", checked=True)
+        core_layout = core_group.get_content_layout()
+        self._populate_column_combobox(self._add_widget_pair("Time Axis (X):", QComboBox(), core_layout, self.basic_config_widgets, "x_col"), include_none=False, data_types=["temporal", "sortable"])
+        self._populate_column_combobox(self._add_widget_pair("Actual Values:", QComboBox(), core_layout, self.basic_config_widgets, "y_col"), include_none=False, data_types=["numeric"])
+        self._populate_column_combobox(self._add_widget_pair("Secondary Values (Y2):", QComboBox(), core_layout, self.basic_config_widgets, "y2_col"), data_types=["numeric"])
+        self._populate_column_combobox(self._add_widget_pair("Budget (Bars):", QComboBox(), core_layout, self.basic_config_widgets, "budget_col"), data_types=["numeric"])
+        layout.addWidget(core_group)
+
+        forecast_group = CollapsibleGroupBox("Forecast Data")
+        forecast_layout = forecast_group.get_content_layout()
+        self._populate_column_combobox(self._add_widget_pair("Forecast:", QComboBox(), forecast_layout, self.basic_config_widgets, "forecast_col"), data_types=["numeric"])
+        self._populate_column_combobox(self._add_widget_pair("Forecast Lower:", QComboBox(), forecast_layout, self.basic_config_widgets, "forecast_lower_col"), data_types=["numeric"])
+        self._populate_column_combobox(self._add_widget_pair("Forecast Upper:", QComboBox(), forecast_layout, self.basic_config_widgets, "forecast_upper_col"), data_types=["numeric"])
+        layout.addWidget(forecast_group)
+        
+        analytics_group = CollapsibleGroupBox("Overlays & Analytics")
+        analytics_layout = analytics_group.get_content_layout()
+        
+        ma_widget = QWidget()
+        ma_layout = QHBoxLayout(ma_widget)
+        ma_checkbox = self._add_widget_pair("Moving Average:", QCheckBox(), ma_layout, self.basic_config_widgets, "add_ma")
+        ma_window_spin = self._add_widget_pair("Window:", QSpinBox(), ma_layout, self.basic_config_widgets, "ma_window")
+        ma_window_spin.setRange(2, 1000)
+        ma_window_spin.setValue(7)
+        ma_window_spin.setEnabled(False)
+        ma_checkbox.toggled.connect(ma_window_spin.setEnabled)
+        analytics_layout.addWidget(ma_widget)
+        
+        self._add_widget_pair("Add Trendline:", QCheckBox(), analytics_layout, self.basic_config_widgets, "add_trendline")
+        layout.addWidget(analytics_group)
+        
+        cb = self._add_widget_pair("Sort Time Axis:", QCheckBox(), layout, self.basic_config_widgets, "sort_x")
+        cb.setChecked(True)
+
     def _add_distplot_column_selector(self, parent_layout, storage_dict, storage_key):
         """
         Adds a collapsible group box with checkboxes for selecting distplot columns.
@@ -792,6 +829,9 @@ class VisualWorkshopApp(QMainWindow):
 
         self._add_widget_pair("X-axis Range:", QLineEdit(), layout, self.advanced_config_widgets, "xaxis_range_edit").setPlaceholderText("min,max")
         self._add_widget_pair("Y-axis Range:", QLineEdit(), layout, self.advanced_config_widgets, "yaxis_range_edit").setPlaceholderText("min,max")
+
+        if plot_type_name == "Time Series Plot":
+            self._add_widget_pair("Show Time Range Slider:", QCheckBox(), layout, self.advanced_config_widgets, "show_range_slider")
 
         color_map_help = (
             "Define custom colors for categorical values.\n"
@@ -1070,7 +1110,7 @@ class VisualWorkshopApp(QMainWindow):
             sampling_method_log = f"Representative sample (CI: {confidence_level_val}%, MoE: {margin_error_val}%)"
             basic_args_temp = {k: self._get_widget_value(w) for k, w in self.basic_config_widgets.items()}
             target_col_for_sampling = None
-            if plot_type in ["Scatter Plot", "Line Plot", "Bar Chart", "Box Plot", "Violin Plot", "Strip Plot", "Density Contour"]:
+            if plot_type in ["Scatter Plot", "Line Plot", "Bar Chart", "Box Plot", "Violin Plot", "Strip Plot", "Density Contour", "Time Series Plot"]:
                 target_col_for_sampling = basic_args_temp.get('y_col')
             elif plot_type == "Histogram": target_col_for_sampling = basic_args_temp.get('x_col')
             elif plot_type == "Pie Chart":
@@ -1321,6 +1361,7 @@ class VisualWorkshopApp(QMainWindow):
             "Histogram": self._add_histogram_traces, "Box Plot": self._add_box_traces,
             "Violin Plot": self._add_violin_traces, "Strip Plot": self._add_strip_traces,
             "Density Contour": self._add_density_contour_traces, "Distribution Plot (Distplot)": self._add_distplot_traces,
+            "Time Series Plot": self._add_timeseries_traces,
         }
 
         if plot_type in plot_trace_adders:
@@ -1975,6 +2016,111 @@ class VisualWorkshopApp(QMainWindow):
         except Exception as e:
             fig.add_annotation(text=f"Error creating distplot: {str(e)}",showarrow=False); print(f"Distplot error: {e}\n{traceback.format_exc()}")
 
+    def _add_timeseries_traces(self, fig, df, basic_args, advanced_args, customdata_numpy_array, hover_data_config, row, col):
+        x_col, y_col = basic_args.get('x_col'), basic_args.get('y_col')
+        y2_col = basic_args.get('y2_col', "None")
+        budget_col = basic_args.get('budget_col', "None")
+        forecast_col = basic_args.get('forecast_col', "None")
+        forecast_lower_col = basic_args.get('forecast_lower_col', "None")
+        forecast_upper_col = basic_args.get('forecast_upper_col', "None")
+        sort_x = basic_args.get('sort_x', True)
+
+        add_ma = basic_args.get('add_ma', False)
+        ma_window = basic_args.get('ma_window', 7)
+        add_trendline = basic_args.get('add_trendline', False)
+
+        if x_col == "None" or x_col not in df.columns or df.is_empty():
+            return
+        if y_col == "None" or y_col not in df.columns:
+            return
+
+        plot_df = df
+        if sort_x and x_col in plot_df.columns:
+            plot_df = plot_df.sort(x_col)
+
+        # 1. Budget Bars (add first to be in the background)
+        if budget_col != "None" and budget_col in plot_df.columns:
+            fig.add_trace(go.Bar(
+                x=plot_df.get_column(x_col), y=plot_df.get_column(budget_col),
+                name='Budgeted', marker_color='sandybrown', opacity=0.6,
+                hovertemplate=self._get_hovertemplate(plot_df, x_col, budget_col, None, None, None, [], "Time Series Plot", advanced_args)
+            ), row=row, col=col)
+
+        # 2. Confidence Interval
+        if forecast_lower_col != "None" and forecast_upper_col != "None" and \
+        forecast_lower_col in plot_df.columns and forecast_upper_col in plot_df.columns:
+            x_data = plot_df.get_column(x_col)
+            lower_bound = plot_df.get_column(forecast_lower_col)
+            upper_bound = plot_df.get_column(forecast_upper_col)
+            x_fill = x_data.to_list() + x_data.to_list()[::-1]
+            y_fill = upper_bound.to_list() + lower_bound.to_list()[::-1]
+            fig.add_trace(go.Scatter(
+                x=x_fill, y=y_fill, fill='toself', fillcolor='rgba(211,211,211,0.5)',
+                line=dict(color='rgba(255,255,255,0)'), hoverinfo="skip",
+                showlegend=True, name='Forecast CI'
+            ), row=row, col=col)
+
+        # 3. Forecast Line
+        if forecast_col != "None" and forecast_col in plot_df.columns:
+            fig.add_trace(go.Scatter(
+                x=plot_df.get_column(x_col), y=plot_df.get_column(forecast_col),
+                name='Forecast', mode='lines', line=dict(dash='dash', color='black'),
+                hovertemplate=self._get_hovertemplate(plot_df, x_col, forecast_col, None, None, None, [], "Time Series Plot", advanced_args)
+            ), row=row, col=col)
+            
+        # 4. Secondary Y-Axis Line
+        if y2_col != "None" and y2_col in plot_df.columns:
+            fig.add_trace(go.Scatter(
+                x=plot_df.get_column(x_col), y=plot_df.get_column(y2_col),
+                name=y2_col, mode='lines', yaxis="y2",
+                line=dict(color='firebrick', dash='dot'),
+                hovertemplate=self._get_hovertemplate(plot_df, x_col, y2_col, None, None, None, [], "Time Series Plot", advanced_args)
+            ), row=row, col=col)
+
+        # 5. Moving Average
+        if add_ma and ma_window > 1:
+            ma_series = plot_df.get_column(y_col).cast(pl.Float64).rolling_mean(window_size=ma_window, min_periods=1)
+            fig.add_trace(go.Scatter(
+                x=plot_df.get_column(x_col), y=ma_series,
+                name=f'{ma_window}-period MA', mode='lines', line=dict(color='lightseagreen'),
+                hovertemplate=self._get_hovertemplate(plot_df, x_col, y_col, None, None, None, [], "Time Series Plot", advanced_args)
+            ), row=row, col=col)
+
+        # 6. Trendline
+        if add_trendline:
+            trend_df = plot_df.filter(pl.col(x_col).is_not_null() & pl.col(y_col).is_not_null())
+            if not trend_df.is_empty():
+                if trend_df.schema[x_col] in pl.TEMPORAL_DTYPES:
+                    x_numeric = trend_df.get_column(x_col).cast(pl.Int64)
+                else:
+                    x_numeric = trend_df.get_column(x_col).cast(pl.Float64, strict=False)
+                
+                y_numeric = trend_df.get_column(y_col).cast(pl.Float64, strict=False)
+                df_with_numeric = trend_df.with_columns(x_num=x_numeric, y_num=y_numeric)
+
+                stats = df_with_numeric.select(
+                    m = pl.cov("x_num", "y_num") / pl.var("x_num"),
+                    b = pl.mean("y_num") - (pl.cov("x_num", "y_num") / pl.var("x_num")) * pl.mean("x_num")
+                ).row(0)
+                m, b = (stats[0], stats[1]) if stats else (None, None)
+
+                if m is not None and b is not None:
+                    trendline_values = m * x_numeric + b
+                    fig.add_trace(go.Scatter(
+                        x=trend_df.get_column(x_col), y=trendline_values, name='Trendline',
+                        mode='lines', line=dict(dash='longdash', color='purple'),
+                        hovertemplate=self._get_hovertemplate(trend_df, x_col, y_col, None, None, None, [], "Time Series Plot", advanced_args)
+                    ), row=row, col=col)
+
+        # 7. Actuals Line (add last to be on top)
+        fig.add_trace(go.Scatter(
+            x=plot_df.get_column(x_col), y=plot_df.get_column(y_col),
+            name='Actual', mode='lines+markers', marker=dict(color='royalblue'), line=dict(color='royalblue'),
+            hovertemplate=self._get_hovertemplate(plot_df, x_col, y_col, None, None, None, hover_data_config, "Time Series Plot", advanced_args),
+            customdata=customdata_numpy_array
+        ), row=row, col=col)
+
+
     def _markdown_to_plotly_html(self, md_text):
         if not md_text:
             return ""
@@ -2077,6 +2223,18 @@ class VisualWorkshopApp(QMainWindow):
             try: layout_updates["yaxis_range"] = [float(v.strip()) for v in y_range_str.split(',')]
             except: 
                 if hasattr(self, 'statusBar'): self.statusBar().showMessage("Invalid Y-axis range format.", 2000)
+
+        if plot_type == "Time Series Plot":
+            if advanced_args.get('show_range_slider', False):
+                layout_updates["xaxis_rangeslider_visible"] = True
+            y2_col = basic_args.get('y2_col', 'None')
+            if y2_col != 'None':
+                layout_updates['yaxis2'] = {
+                    'title': y2_col, 'overlaying': 'y', 'side': 'right'
+                }
+                if 'margin' not in layout_updates: layout_updates['margin'] = {}
+                layout_updates['margin']['r'] = 60
+
 
         template = advanced_args.get('template_combo', "None")
         if template != "None": layout_updates["template"] = template
