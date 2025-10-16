@@ -261,7 +261,7 @@ class ContainerFileNavigator:
 
 
 class FileLoaderWorker(QThread): # QThread is good if UI interaction is needed via signals
-    # Add signals for UI interaction if ContainerFileNavigator needs to prompt user
+    request_excel_to_csv_conversion = Signal(str)
     request_npz_array_selection = Signal(list, str) # list of array_info, file_path
     npz_array_selected = Signal(str) # selected array name
 
@@ -286,7 +286,8 @@ class FileLoaderWorker(QThread): # QThread is good if UI interaction is needed v
         self.selected_npz_array_name = None
         self.selected_pickle_item_path = None
         self.selection_event = threading.Event()
-
+        self.excel_conversion_event = threading.Event()
+        self.user_wants_csv_conversion = False
 
 
     def wait_for_file_access(self, file_path, max_attempts=10, delay=1):
@@ -317,30 +318,7 @@ class FileLoaderWorker(QThread): # QThread is good if UI interaction is needed v
         current_path_for_reading = self.file_path 
         file_ext = os.path.splitext(current_path_for_reading)[1].lower()
 
-        try:
-            if file_ext in ['.xlsx', '.xlsm', '.xlsb', '.xls'] and \
-               os.path.getsize(current_path_for_reading) >= 1000 * (2**10 * 2**10) and \
-               convert_all_to_csv:
-                print(f"Converting Excel file '{os.path.basename(current_path_for_reading)}' to CSV...", file=sys.__stdout__)
-                output_csv_path = Path(tempfile.gettempdir()).joinpath(
-                    f"{Path(current_path_for_reading).stem.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-                )
-                from xlsx2csv import Xlsx2csv 
-                converter = Xlsx2csv(current_path_for_reading, outputencoding="utf-8", delimiter=',') 
-                converter.convert(str(output_csv_path), sheetname=self.sheet_name)
-                print(f"Excel file '{os.path.basename(current_path_for_reading)}' converted to CSV: {output_csv_path}", file=sys.__stdout__)
-                
-                current_path_for_reading = str(output_csv_path) # Update path to read from the temp CSV
-                file_ext = '.csv' # Update extension for further processing
-                
-                if output_csv_path.exists() and output_csv_path.stat().st_size > 0 and self.wait_for_file_access(current_path_for_reading):
-                    df_temp, csv_file_info = self.read_csv(current_path_for_reading) 
-                    df = df_temp
-                    file_info.update(csv_file_info)
-                    file_info['source_format'] = 'Excel (Large, converted to CSV)'
-                else:
-                    raise Exception("Converted CSV is empty or inaccessible.")
-            
+        try:            
             # Re-check file_ext as it might have changed if Excel was converted to CSV
             if file_ext == '.csv':
                 # If df is already loaded (from Excel->CSV conversion), don't reload
@@ -409,30 +387,75 @@ class FileLoaderWorker(QThread): # QThread is good if UI interaction is needed v
 
 
     def read_excel(self, filename, sheet_name=None, nrows=None):
+        try:
+            # First attempt to read directly
+            list_sheetnames = get_sheet_names(filename)
+            opened_sheet = sheet_name if (sheet_name is not None and sheet_name in list_sheetnames and len(list_sheetnames) > 1) else list_sheetnames[0]
+            
+            df = pl.read_excel(
+                filename,
+                sheet_name=opened_sheet,
+                infer_schema_length=0,
+                read_csv_options={'infer_schema_length': 0} # For polars excel engine
+            )
 
-        list_sheetnames = get_sheet_names(filename)
-        opened_sheet = sheet_name if (sheet_name is not None and (sheet_name in list_sheetnames) and (len(list_sheetnames)>1)) else list_sheetnames[0]
-        df = pl.read_excel(
-            filename,
-            sheet_name=opened_sheet,
-            infer_schema_length=0
-        )
+            if nrows is not None and nrows > 0:
+                df = df.slice(0, nrows)
 
-        if nrows is not None and nrows > 0 :
-            df = df.slice(0, nrows)
+            if self.dtype_is_str:
+                df = df.select([pl.all().cast(pl.Utf8)])
 
-        if self.dtype_is_str:
-             df = df.select([pl.all().cast(pl.Utf8)])
+            file_info = {
+                'filename': filename, 'sheet_name': opened_sheet, 'total_sheets': len(list_sheetnames),
+                'rows': df.height, 'columns': df.width, 'size': os.path.getsize(filename) / (1024 * 1024),
+                'source_format': 'Excel'
+            }
+            return df, file_info
+        
+        except Exception as e:
+            # If the direct read fails, ask the user about CSV conversion
+            print(f"Direct Excel read failed: {e}. Requesting user input for CSV conversion.")
+            self.excel_conversion_event.clear()
+            self.request_excel_to_csv_conversion.emit(filename) # Signal to GUI
+            self.excel_conversion_event.wait(timeout=60) # Wait for user's choice
 
-        file_info = {
-            'filename': filename,
-            'sheet_name': opened_sheet,
-            'total_sheets': len(list_sheetnames),
-            'rows': df.height,
-            'columns': df.width,
-            'size': os.path.getsize(filename) / (1024 * 1024)
-        }
-        return df, file_info
+            if hasattr(self, 'user_wants_csv_conversion') and self.user_wants_csv_conversion:
+                # User said yes. Proceed with conversion.
+                print("User approved CSV conversion. Attempting now...")
+                try:
+                    output_csv_path = Path(tempfile.gettempdir()).joinpath(
+                        f"{Path(filename).stem.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+                    )
+                    from xlsx2csv import Xlsx2csv
+                    list_sheetnames_again = get_sheet_names(filename)
+                    opened_sheet_again = sheet_name if sheet_name and sheet_name in list_sheetnames_again else list_sheetnames_again[0]
+                    
+                    converter = Xlsx2csv(filename, outputencoding="utf-8", delimiter=',')
+                    converter.convert(str(output_csv_path), sheetname=opened_sheet_again)
+                    
+                    if self.wait_for_file_access(str(output_csv_path)):
+                        df_csv, csv_file_info = self.read_csv(str(output_csv_path))
+                        csv_file_info['source_format'] = 'Excel (converted to CSV after fail)'
+                        csv_file_info['original_filename'] = filename
+                        csv_file_info['sheet_name'] = opened_sheet_again
+                        # Keep the file info pointing to the original excel file for user display
+                        csv_file_info['filename'] = filename
+                        csv_file_info['size'] = os.path.getsize(filename) / (1024*1024)
+                        return df_csv, csv_file_info
+                    else:
+                        raise Exception("Conversion to CSV resulted in an empty or inaccessible file.")
+                except Exception as conversion_error:
+                    raise Exception(f"Initial read failed. CSV conversion also failed: {conversion_error}") from e
+            else:
+                # User said no or timed out. Re-raise the original exception.
+                raise Exception("Failed to read Excel file directly and user declined CSV conversion attempt.") from e
+
+    # Add this new slot method to the FileLoaderWorker class
+    @Slot(bool)
+    def on_excel_conversion_choice(self, proceed_with_conversion):
+        self.user_wants_csv_conversion = proceed_with_conversion
+        self.excel_conversion_event.set()
+
 
     def handle_npz_load(self, file_path):
         contents = self.navigator.inspect_npz(file_path)
@@ -1272,7 +1295,7 @@ class AsyncFileLoaderThread(QThread):
     # New signals to relay from worker to main GUI for dialogs
     request_npz_array_selection = Signal(list, str)
     request_pickle_item_selection = Signal(list, str, str)
-
+    request_excel_to_csv_conversion = Signal(str)
 
     def __init__(self, file_path, sheet_name=None, parent_gui=None, parent=None): # Added parent_gui
         super().__init__(parent)
@@ -1286,7 +1309,12 @@ class AsyncFileLoaderThread(QThread):
         # Relay signals from worker_instance to this thread's signals
         self.worker_instance.request_npz_array_selection.connect(self.request_npz_array_selection)
         self.worker_instance.request_pickle_item_selection.connect(self.request_pickle_item_selection)
-
+        self.worker_instance.request_excel_to_csv_conversion.connect(self.request_excel_to_csv_conversion)
+        
+    @Slot(bool)
+    def on_excel_conversion_choice_relayed(self, choice):
+        if hasattr(self.worker_instance, 'on_excel_conversion_choice'):
+            self.worker_instance.on_excel_conversion_choice(choice)
 
     def run(self):
         try:
@@ -2481,17 +2509,19 @@ class Pickaxe(QMainWindow):
             self.update_progress(0, f"Loading '{os.path.basename(file_name)}'...")
             QApplication.processEvents()
 
-            self.file_loader_thread = AsyncFileLoaderThread(file_name, sheet_name, parent_gui=self) # Modified Async to pass parent_gui
-            
+            self.file_loader_thread = AsyncFileLoaderThread(file_name, sheet_name, parent_gui=self)
+
             # Connect new signals from the worker instance (which is inside AsyncFileLoaderThread)
             # This assumes AsyncFileLoaderThread exposes its worker or the signals directly.
             # Let's assume AsyncFileLoaderThread's worker is self.worker_instance
             if hasattr(self.file_loader_thread, 'worker_instance'): # If worker is accessible
                 self.file_loader_thread.worker_instance.request_npz_array_selection.connect(self.prompt_npz_array_selection)
                 self.file_loader_thread.worker_instance.request_pickle_item_selection.connect(self.prompt_pickle_item_selection)
+                self.file_loader_thread.worker_instance.request_excel_to_csv_conversion.connect(self.prompt_excel_to_csv_conversion)
             else: # If AsyncFileLoaderThread itself relays the signals
                 self.file_loader_thread.request_npz_array_selection.connect(self.prompt_npz_array_selection)
                 self.file_loader_thread.request_pickle_item_selection.connect(self.prompt_pickle_item_selection)
+                self.file_loader_thread.request_excel_to_csv_conversion.connect(self.prompt_excel_to_csv_conversion) 
 
             self.file_loader_thread.finished_signal.connect(self.on_file_loaded)
             self.file_loader_thread.error_signal.connect(self.on_error)
@@ -2499,6 +2529,19 @@ class Pickaxe(QMainWindow):
 
         else:
             self.update_progress(0, ""); self.progress_bar.setVisible(False); self.progress_label.setVisible(False)
+
+    @Slot(str)
+    def prompt_excel_to_csv_conversion(self, filename):
+        reply = QMessageBox.question(self, "Excel Load Failed",
+                                       f"Could not open '{os.path.basename(filename)}' directly.\n\n"
+                                       "This can happen with very large or complex files.\n\n"
+                                       "Do you want to try converting it to a temporary CSV file and loading that instead?",
+                                       QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        
+        choice = (reply == QMessageBox.Yes)
+        
+        if hasattr(self.file_loader_thread, 'on_excel_conversion_choice_relayed'):
+            self.file_loader_thread.on_excel_conversion_choice_relayed(choice)
 
     @Slot(object, dict)
     def on_file_loaded(self, df, file_info):
