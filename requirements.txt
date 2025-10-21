@@ -36,4 +36,6 @@ numpy
 hickle
 
 
-nuitka # For packaging the application into a standalone executable
+cx_Freeze
+matplotlib
+seaborn

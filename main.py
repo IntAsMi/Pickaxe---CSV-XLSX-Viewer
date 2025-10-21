@@ -83,8 +83,7 @@ def get_sheet_names(file_name):
         try:
             with ZipFile(file_name) as archive:
                 if 'xl/workbook.xml' not in archive.namelist():
-                    with load_workbook(file_name, read_only=True, data_only=True) as wb_openpyxl:
-                        return wb_openpyxl.sheetnames
+                    return load_workbook(file_name, read_only=True, data_only=True).sheetnames
                 tree = ET.parse(archive.open('xl/workbook.xml'))
                 root = tree.getroot()
                 ns = {'main': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
@@ -94,8 +93,7 @@ def get_sheet_names(file_name):
                     sheets_data.append({'name': name})
                 return [s['name'] for s in sheets_data]
         except Exception:
-            with load_workbook(file_name, read_only=True, data_only=True) as workbook:
-                return workbook.sheetnames
+            return load_workbook(file_name, read_only=True, data_only=True) .sheetnames
     else:
         raise ValueError(f"Unsupported file format: {file_name}")
 
@@ -346,7 +344,7 @@ class FileLoaderWorker(QThread): # QThread is good if UI interaction is needed v
                 else:
                     raise ValueError("Hickle library not installed. Cannot read .hkl files.")
             elif file_ext == '.json': 
-                df = pl.read_json(current_path_for_reading, n_rows=self.nrows)
+                df = pl.read_json(current_path_for_reading)
                 file_info['source_format'] = 'JSON'
             elif file_ext in ['.jsonl', '.ndjson']: 
                 df = pl.read_ndjson(current_path_for_reading, n_rows=self.nrows)
