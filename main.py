@@ -56,7 +56,7 @@ def resource_path(relative_path):
     if hasattr(sys, r'_MEIPASS') :
         try:
             # PyInstaller/Nuitka creates a temp folder and stores path in _MEIPASS
-            base_path = sys._MEIPASS
+            base_path = sys._MEIPASS # type: ignore
         except AttributeError: # AttributeError if _MEIPASS is not set (e.g. running as script)
             base_path = os.path.abspath(".")
     else:
@@ -519,11 +519,12 @@ class FileLoaderWorker(QThread): # QThread is good if UI interaction is needed v
                     dialect = excel; dialect.delimiter = ','; dialect.quotechar = '"'
                 else:
                     sniffer_instance = Sniffer()
-                    dialect = sniffer_instance.sniff(sample, delimiters=[',', ';', '\t', '|'])
+                    dialect = sniffer_instance.sniff(sample, delimiters=',;\t|')
                     if len(sample) > 100 and dialect.delimiter not in sample[:100]:
                         char_count = {char: sample.count(char) for char in [',', ';', '\t', '|'] if char in sample[:max(1000,len(sample)//10)]}
                         if char_count:
-                            dialect.delimiter = max(char_count, key=char_count.get)
+                            dialect.delimiter = max(char_count, key=lambda k: char_count[k])
+
         except Exception:
             dialect = excel
             dialect.delimiter = ','
@@ -766,7 +767,7 @@ class FilterWorker(QThread):
     def apply_date_filter(self, column, comparison, filter_string, filter_string2):
         try:
             if self.df.schema[column] == pl.Utf8:
-                 col_expr = pl.col(column).str.to_date(format="%Y-%m-%d", strict=False, ambiguous='earliest')
+                 col_expr = pl.col(column).str.to_date(format="%Y-%m-%d", strict=False)
             else:
                  col_expr = pl.col(column).cast(pl.Date, strict=False)
 
@@ -1257,7 +1258,7 @@ class PolarsModel(QAbstractTableModel):
     def data_frame(self): return self._data_for_cells # Returns only displayable data
     def rowCount(self, parent=None): return self._row_count
     def columnCount(self, parent=None): return self._column_count
-    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+    def data(self, index, role: int = Qt.ItemDataRole.DisplayRole):
         if self._data_for_cells is not None and index.isValid():
             if role == Qt.ItemDataRole.DisplayRole:
                 try:
@@ -2228,111 +2229,114 @@ class Pickaxe(QMainWindow):
         error_details = []
         user_cancelled_all = False
         yes_to_all_warnings = False
+        df_shape_before_batch_op = 0
         
-        df_shape_before_batch_op = self.df.shape if not self.df.is_empty() else None
+        if self.df:
+            
+            df_shape_before_batch_op = self.df.shape if not (self.df.is_empty()) else None
 
-        for i, col_name in enumerate(selected_names):
-            self.update_progress(int(((i + 0.5) / num_selected) * 100), f"Converting {i+1}/{num_selected}: '{col_name}' to {type_name}...")
-            QApplication.processEvents()
+            for i, col_name in enumerate(selected_names):
+                self.update_progress(int(((i + 0.5) / num_selected) * 100), f"Converting {i+1}/{num_selected}: '{col_name}' to {type_name}...")
+                QApplication.processEvents()
 
-            try:
-                if col_name not in self.df.columns:
-                    error_details.append(f"'{col_name}': Column not found in DataFrame.")
-                    continue
+                try:
+                    if col_name not in self.df.columns:
+                        error_details.append(f"'{col_name}': Column not found in DataFrame.")
+                        continue
 
-                original_column_series = self.df.get_column(col_name)
-                original_nulls = original_column_series.is_null().sum()
-                current_col_schema_dtype = self.df.schema[col_name]
+                    original_column_series = self.df.get_column(col_name)
+                    original_nulls = original_column_series.is_null().sum()
+                    current_col_schema_dtype = self.df.schema[col_name]
 
-                final_conversion_expr = None
-                actual_target_polars_type = None 
+                    final_conversion_expr = None
+                    actual_target_polars_type = None 
 
-                if type_name == "numeric_float": 
-                    actual_target_polars_type = pl.Float64
-                    final_conversion_expr = pl.col(col_name).cast(pl.Float64, strict=False)
-                elif type_name == "integer": 
-                    actual_target_polars_type = pl.Int64
-                    final_conversion_expr = pl.col(col_name).cast(pl.Int64, strict=False)
-                elif type_name == "datetime": 
-                    actual_target_polars_type = pl.Datetime
-                    if current_col_schema_dtype == pl.Utf8:
-                        final_conversion_expr = pl.col(col_name).str.to_datetime(strict=False, time_unit='ns', ambiguous='earliest', format=None).dt.replace_time_zone(None)
-                    else: 
-                        final_conversion_expr = pl.col(col_name).cast(pl.Datetime, strict=False).dt.replace_time_zone(None)
-                elif type_name == "categorical": 
-                    actual_target_polars_type = pl.Categorical
-                    final_conversion_expr = pl.col(col_name).cast(pl.Categorical, strict=False) # Use strict=False initially
-                elif type_name == "boolean": # New Boolean type
-                    actual_target_polars_type = pl.Boolean
-                    # Polars' cast to Boolean is quite good with "true"/"false", 0/1
-                    # For more complex strings ("Yes", "No"), pre-processing might be needed
-                    # but for now, a direct cast is a good first step.
-                    # Map common string representations of booleans to actual booleans before casting
-                    if current_col_schema_dtype == pl.Utf8:
-                        col_lower = pl.col(col_name).str.to_lowercase()
-                        final_conversion_expr = (
-                            pl.when(col_lower.is_in(["true", "yes", "1", "t"]))
-                            .then(pl.lit(True, dtype=pl.Boolean))
-                            .when(col_lower.is_in(["false", "no", "0", "f"]))
-                            .then(pl.lit(False, dtype=pl.Boolean))
-                            .otherwise(pl.lit(None, dtype=pl.Boolean)) # Map others to Null
-                        )
-                    else: # If not string, direct cast
-                        final_conversion_expr = pl.col(col_name).cast(pl.Boolean, strict=False)
+                    if type_name == "numeric_float": 
+                        actual_target_polars_type = pl.Float64
+                        final_conversion_expr = pl.col(col_name).cast(pl.Float64, strict=False)
+                    elif type_name == "integer": 
+                        actual_target_polars_type = pl.Int64
+                        final_conversion_expr = pl.col(col_name).cast(pl.Int64, strict=False)
+                    elif type_name == "datetime": 
+                        actual_target_polars_type = pl.Datetime
+                        if current_col_schema_dtype == pl.Utf8:
+                            final_conversion_expr = pl.col(col_name).str.to_datetime(strict=False, time_unit='ns', ambiguous='earliest', format=None).dt.replace_time_zone(None)
+                        else: 
+                            final_conversion_expr = pl.col(col_name).cast(pl.Datetime, strict=False).dt.replace_time_zone(None)
+                    elif type_name == "categorical": 
+                        actual_target_polars_type = pl.Categorical
+                        final_conversion_expr = pl.col(col_name).cast(pl.Categorical, strict=False) # Use strict=False initially
+                    elif type_name == "boolean": # New Boolean type
+                        actual_target_polars_type = pl.Boolean
+                        # Polars' cast to Boolean is quite good with "true"/"false", 0/1
+                        # For more complex strings ("Yes", "No"), pre-processing might be needed
+                        # but for now, a direct cast is a good first step.
+                        # Map common string representations of booleans to actual booleans before casting
+                        if current_col_schema_dtype == pl.Utf8:
+                            col_lower = pl.col(col_name).str.to_lowercase()
+                            final_conversion_expr = (
+                                pl.when(col_lower.is_in(["true", "yes", "1", "t"]))
+                                .then(pl.lit(True, dtype=pl.Boolean))
+                                .when(col_lower.is_in(["false", "no", "0", "f"]))
+                                .then(pl.lit(False, dtype=pl.Boolean))
+                                .otherwise(pl.lit(None, dtype=pl.Boolean)) # Map others to Null
+                            )
+                        else: # If not string, direct cast
+                            final_conversion_expr = pl.col(col_name).cast(pl.Boolean, strict=False)
 
-                elif type_name == "string_key": 
-                    actual_target_polars_type = pl.Utf8
-                    final_conversion_expr = pl.col(col_name).cast(pl.Utf8)
-                elif type_name == "numeric": # Context menu "Convert to Numeric" usually implies float
-                    actual_target_polars_type = pl.Float64
-                    final_conversion_expr = pl.col(col_name).cast(pl.Float64, strict=False)
+                    elif type_name == "string_key": 
+                        actual_target_polars_type = pl.Utf8
+                        final_conversion_expr = pl.col(col_name).cast(pl.Utf8)
+                    elif type_name == "numeric": # Context menu "Convert to Numeric" usually implies float
+                        actual_target_polars_type = pl.Float64
+                        final_conversion_expr = pl.col(col_name).cast(pl.Float64, strict=False)
 
 
-                if final_conversion_expr is None:
-                    error_details.append(f"'{col_name}': No conversion logic for target type name '{type_name}'.")
-                    continue
-
-                temp_converted_series = self.df.select(final_conversion_expr.alias("___temp_batch_check___")).get_column("___temp_batch_check___")
-                converted_nulls = temp_converted_series.is_null().sum()
-                newly_created_nulls = converted_nulls - original_nulls
-
-                significant_new_nans = False
-                original_non_null_count = self.df.height - original_nulls
-                if original_non_null_count > 0 and (newly_created_nulls / original_non_null_count > 0.1):
-                    significant_new_nans = True
-                elif newly_created_nulls > 0.05 * self.df.height:
-                    significant_new_nans = True
+                    if final_conversion_expr is None:
+                        error_details.append(f"'{col_name}': No conversion logic for target type name '{type_name}'.")
+                        continue
                 
-                if type_name == "string_key" or type_name == "boolean": # Don't usually warn for these if result is mostly nulls as intended
+                    temp_converted_series = self.df.select(final_conversion_expr.alias("___temp_batch_check___")).get_column("___temp_batch_check___")
+                    converted_nulls = temp_converted_series.is_null().sum()
+                    newly_created_nulls = converted_nulls - original_nulls
+
                     significant_new_nans = False
-
-
-                if significant_new_nans and not yes_to_all_warnings:
-                    msg_box = QMessageBox(self); msg_box.setIcon(QMessageBox.warning)
-                    msg_box.setWindowTitle(f"Conversion Warning for '{col_name}'")
-                    msg_box.setText(f"Converting '{col_name}' to {type_name} resulted in {newly_created_nulls} new empty/null values. Proceed with this column?")
-                    yes_button = msg_box.addButton("Yes", QMessageBox.ButtonRole.YesRole); no_button = msg_box.addButton("No", QMessageBox.ButtonRole.NoRole)
-                    yes_all_button = msg_box.addButton("Yes to All", QMessageBox.ButtonRole.AcceptRole); cancel_all_button = msg_box.addButton("Cancel All", QMessageBox.ButtonRole.RejectRole)
-                    msg_box.setDefaultButton(yes_button); msg_box.exec()
+                    original_non_null_count = self.df.height - original_nulls
+                    if original_non_null_count > 0 and (newly_created_nulls / original_non_null_count > 0.1):
+                        significant_new_nans = True
+                    elif newly_created_nulls > 0.05 * self.df.height:
+                        significant_new_nans = True
                     
-                    clicked_btn = msg_box.clickedButton()
-                    if clicked_btn == no_button: 
-                        skipped_details.append(f"'{col_name}': Skipped by user due to new nulls."); continue
-                    elif clicked_btn == cancel_all_button: 
-                        user_cancelled_all = True; skipped_details.append(f"'{col_name}': Batch cancelled by user."); break
-                    elif clicked_btn == yes_all_button: 
-                        yes_to_all_warnings = True
+                    if type_name == "string_key" or type_name == "boolean": # Don't usually warn for these if result is mostly nulls as intended
+                        significant_new_nans = False
+
+                    if significant_new_nans and not yes_to_all_warnings:
+                        msg_box = QMessageBox(self); msg_box.setIcon(QMessageBox.Icon.Warning)
+                        msg_box.setWindowTitle(f"Conversion Warning for '{col_name}'")
+                        msg_box.setText(f"Converting '{col_name}' to {type_name} resulted in {newly_created_nulls} new empty/null values. Proceed with this column?")
+                        yes_button = msg_box.addButton("Yes", QMessageBox.ButtonRole.YesRole); no_button = msg_box.addButton("No", QMessageBox.ButtonRole.NoRole)
+                        yes_all_button = msg_box.addButton("Yes to All", QMessageBox.ButtonRole.AcceptRole); cancel_all_button = msg_box.addButton("Cancel All", QMessageBox.ButtonRole.RejectRole)
+                        msg_box.setDefaultButton(yes_button); msg_box.exec()
+                        
+                        clicked_btn = msg_box.clickedButton()
+                        if clicked_btn == no_button: 
+                            skipped_details.append(f"'{col_name}': Skipped by user due to new nulls."); continue
+                        elif clicked_btn == cancel_all_button: 
+                            user_cancelled_all = True; skipped_details.append(f"'{col_name}': Batch cancelled by user."); break
+                        elif clicked_btn == yes_all_button: 
+                            yes_to_all_warnings = True
 
 
-                self.df = self.df.with_columns(final_conversion_expr.alias(col_name))
-                if self.filtered_df is not None and col_name in self.filtered_df.columns:
-                    self.filtered_df = self.filtered_df.with_columns(final_conversion_expr.alias(col_name))
-                converted_count += 1
-            except Exception as e: 
-                error_details.append(f"'{col_name}': {str(e)}")
-                print(f"Error converting {col_name} to {type_name}: {e}") 
-                import traceback
-                traceback.print_exc()
+                    self.df = self.df.with_columns(final_conversion_expr.alias(col_name))
+                    if self.filtered_df is not None and col_name in self.filtered_df.columns:
+                        self.filtered_df = self.filtered_df.with_columns(final_conversion_expr.alias(col_name))
+                    converted_count += 1
+                        
+                except Exception as e: 
+                    error_details.append(f"'{col_name}': {str(e)}")
+                    print(f"Error converting {col_name} to {type_name}: {e}") 
+                    import traceback
+                    traceback.print_exc()
 
 
         self.update_progress(95, "Updating view after batch conversion...")
@@ -2355,15 +2359,20 @@ class Pickaxe(QMainWindow):
         self.update_progress(100, f"Batch {type_name} conversion finished.")
         self.types_suggested_and_applied_this_session = True
 
+        if self.df:
+            df_shape_after_batch_op = self.df.shape if not self.df.is_empty() else None
+        else:
+            df_shape_after_batch_op = 0
+            
         logger.log_action("Pickaxe", "Batch Type Conversion", 
-                          f"Attempted to convert {num_selected} columns to {type_name}.",
-                          details={"Columns Selected": selected_names, 
-                                   "Target Type Name": type_name,
-                                   "Target Polars Type": str(target_polars_type if target_polars_type else "Inferred from type_name"),
-                                   "Converted Count": converted_count,
-                                   "Skipped": skipped_details, "Errors": error_details},
-                          df_shape_before=df_shape_before_batch_op,
-                          df_shape_after=self.df.shape if not self.df.is_empty() else None)
+                        f"Attempted to convert {num_selected} columns to {type_name}.",
+                        details={"Columns Selected": selected_names, 
+                                "Target Type Name": type_name,
+                                "Target Polars Type": str(target_polars_type if target_polars_type else "Inferred from type_name"),
+                                "Converted Count": converted_count,
+                                "Skipped": skipped_details, "Errors": error_details},
+                        df_shape_before=df_shape_before_batch_op,
+                        df_shape_after=df_shape_after_batch_op)
 
     def convert_selected_columns_to_numeric_batch(self):
         self._batch_convert_columns("numeric")
@@ -2565,12 +2574,14 @@ class Pickaxe(QMainWindow):
         if "__original_index__" not in df.columns:
             self.df = df.with_row_count("__original_index__") # Add original index
         
-        self.filtered_df = self.df.clone()
+        if self.df:
+            self.filtered_df = self.df.clone()
 
         if self._filepath.name.lower().endswith(('.xlsx', '.xlsm', '.xlsb', '.xls')):
             file_info['total_sheets'] = len(self.sheet_names) if hasattr(self, 'sheet_names') else (1 if file_info.get('sheet_name') else 'N/A')
         self.file_info = file_info
-        self.original_row_count = self.df.height 
+        if self.df:
+            self.original_row_count = self.df.height 
         
         logger.log_dataframe_load(
             "Pickaxe",
@@ -2580,8 +2591,8 @@ class Pickaxe(QMainWindow):
             cols=self.file_info.get('columns', df.width), 
             load_time_sec=self.file_info.get('load_time', 0)
         )
-        
-        self.df_shape_before = (self.df.height, self.df.width)
+        if self.df:
+            self.df_shape_before = (self.df.height, self.df.width)
                             
         self.applied_filters_info = []
         self.update_model_slot(self.filtered_df, True)
@@ -2590,19 +2601,21 @@ class Pickaxe(QMainWindow):
             self.filter_panel.panel_filters_changed.disconnect(self.update_query_input_from_structured_filters)
             self.filter_panel.deleteLater(); self.filter_panel = None
 
-        columns_for_panel = [c for c in self.df.columns if c != "__original_index__"]
-        self.filter_panel = FilterPanel(columns_for_panel)
-        self.filter_panel.panel_filters_changed.connect(self.update_query_input_from_structured_filters)
+        if self.df:
+            columns_for_panel = [c for c in self.df.columns if c != "__original_index__"]
+            self.filter_panel = FilterPanel(columns_for_panel)
+            self.filter_panel.panel_filters_changed.connect(self.update_query_input_from_structured_filters)
 
-        if columns_for_panel or not df.is_empty(): # Always enable filter panel if df is loaded
-            self.filter_panel.apply_button.clicked.connect(self.apply_structured_filters)
-            self.filter_panel.setEnabled(True); self.filter_toggle_button.setEnabled(True)
-        else: 
-            self.filter_panel.setEnabled(False)
-            self.filter_toggle_button.setEnabled(False)
+            if columns_for_panel or not df.is_empty(): # Always enable filter panel if df is loaded
+                self.filter_panel.apply_button.clicked.connect(self.apply_structured_filters)
+                self.filter_panel.setEnabled(True); self.filter_toggle_button.setEnabled(True)
+            else: 
+                self.filter_panel.setEnabled(False)
+                self.filter_toggle_button.setEnabled(False)
+                
+            self._layout.insertWidget(4, self.filter_panel)
+            self.filter_panel.setVisible(False)
             
-        self._layout.insertWidget(4, self.filter_panel)
-        self.filter_panel.setVisible(False)
         self.update_progress(100, f"File '{os.path.basename(self._filepath)}' loaded.")
         if hasattr(self, 'file_loader_thread') and self.file_loader_thread:
             self.file_loader_thread.quit(); self.file_loader_thread.wait()
@@ -2632,10 +2645,11 @@ class Pickaxe(QMainWindow):
             self.vw_button.setEnabled(False) # Disable VW button if no data
             self.dt_button.setEnabled(False)
             self.suggest_conversions_button.setEnabled(False) # Disable new button
-
-        displayable_width = len([c for c in self.df.columns if c != "__original_index__"])
-        self.prev_columns_button.setEnabled(displayable_width > self.columns_per_page)
-        self.next_columns_button.setEnabled(displayable_width > self.columns_per_page)
+            
+        if self.df:
+            displayable_width = len([c for c in self.df.columns if c != "__original_index__"])
+            self.prev_columns_button.setEnabled(displayable_width > self.columns_per_page)
+            self.next_columns_button.setEnabled(displayable_width > self.columns_per_page)
 
         self.update_completer_model()
 
@@ -2827,21 +2841,22 @@ class Pickaxe(QMainWindow):
 
         for col_label, str_rb, cat_rb, bool_rb, int_rb, flt_rb, dt_rb in self.conversion_radio_button_groups:
             col_name_to_convert = col_label.text()
-            current_col_dtype = self.df.schema[col_name_to_convert]
-
-            if flt_rb.isChecked() and not isinstance(current_col_dtype, (pl.Float32, pl.Float64)):
-                cols_to_float.append(col_name_to_convert)
-            elif int_rb.isChecked() and not current_col_dtype.is_integer():
-                cols_to_int.append(col_name_to_convert)
-            elif dt_rb.isChecked() and not current_col_dtype.is_temporal():
-                cols_to_datetime.append(col_name_to_convert)
-            elif cat_rb.isChecked() and current_col_dtype != pl.Categorical:
-                cols_to_category.append(col_name_to_convert)
-            elif bool_rb.isChecked() and current_col_dtype != pl.Boolean: # New
-                cols_to_boolean.append(col_name_to_convert)
-            elif str_rb.isChecked() and current_col_dtype != pl.Utf8: 
-                cols_to_string.append(col_name_to_convert)
-        
+            
+            if self.df:
+                current_col_dtype = self.df.schema[col_name_to_convert]
+                if flt_rb.isChecked() and not isinstance(current_col_dtype, (pl.Float32, pl.Float64)):
+                    cols_to_float.append(col_name_to_convert)
+                elif int_rb.isChecked() and not current_col_dtype.is_integer():
+                    cols_to_int.append(col_name_to_convert)
+                elif dt_rb.isChecked() and not current_col_dtype.is_temporal():
+                    cols_to_datetime.append(col_name_to_convert)
+                elif cat_rb.isChecked() and current_col_dtype != pl.Categorical:
+                    cols_to_category.append(col_name_to_convert)
+                elif bool_rb.isChecked() and current_col_dtype != pl.Boolean: # New
+                    cols_to_boolean.append(col_name_to_convert)
+                elif str_rb.isChecked() and current_col_dtype != pl.Utf8: 
+                    cols_to_string.append(col_name_to_convert)
+            
         any_conversion_done = False
         if cols_to_float:
             self.context_menu_selected_column_names = cols_to_float
@@ -3144,12 +3159,13 @@ class Pickaxe(QMainWindow):
     @Slot(str)
     def on_save_completed(self, file_name_cb):
         
-        logger.log_dataframe_save(
-            "Pickaxe", file_name_cb, # This is the actual saved file
-            rows=getattr(self, 'df_to_save_op_ref', self.df).height, 
-            cols=getattr(self, 'df_to_save_op_ref', self.df).width,
-            source_data_name=os.path.basename(self._filepath) if self._filepath else "current data"
-        )
+        if self.df:
+            logger.log_dataframe_save(
+                "Pickaxe", file_name_cb,
+                rows=getattr(self, 'df_to_save_op_ref', self.df).height, 
+                cols=getattr(self, 'df_to_save_op_ref', self.df).width,
+                source_data_name=os.path.basename(self._filepath) if self._filepath else "current data"
+            )
         
         self.update_progress(100, f"File saved successfully as {file_name_cb}")
         QMessageBox.information(self, "Save Successful", f"File saved successfully as {file_name_cb}")
@@ -3383,14 +3399,14 @@ class Pickaxe(QMainWindow):
         except Exception as e:
             self.update_progress(100, f"Error setting header: {e}")
             QMessageBox.critical(self, "Set Header Error", str(e))
-            logger.log_action( "Pickaxe", "Header Changing Error", details={"Error": str(e)})
+            logger.log_action( "Pickaxe", "Header Changing Error", "Error Setting Header", details={"Error": str(e)})
 
     def update_file_info_label(self):
         if not self._filepath or not self.file_info: self.file_info_label.setText("No file loaded."); return
         file_name_base = os.path.basename(self._filepath)
         display_file_name = file_name_base if len(file_name_base) <= 60 else file_name_base[:25] + "..." + file_name_base[-30:]
         file_info_text = f"  File: '{display_file_name}'\n"
-        if self._filepath.lower().endswith(('.xlsx', '.xls', '.xlsm', '.xlsb')):
+        if self._filepath.name.lower().endswith(('.xlsx', '.xls', '.xlsm', '.xlsb')):
             file_info_text += f" Sheet: '{self.file_info.get('sheet_name', 'N/A')}' (Total: {self.file_info.get('total_sheets', 'N/A')}) | "
         else: file_info_text += f" Delimiter: '{self.file_info.get('delimiter', 'N/A')}' | Encoding: '{self.file_info.get('encoding', 'N/A')}' | "
 
@@ -3415,7 +3431,13 @@ class Pickaxe(QMainWindow):
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             focused_widget = QApplication.focusWidget()
-            if self.filter_panel and self.filter_panel.isVisible() and self.filter_panel.isAncestorOf(focused_widget):
+            
+            if focused_widget and self.filter_panel:
+                foc_widg_flg = self.filter_panel.isAncestorOf(focused_widget)
+            else:
+                foc_widg_flg = False
+                
+            if self.filter_panel and self.filter_panel.isVisible() and foc_widg_flg:
                 if isinstance(focused_widget, (QLineEdit, QComboBox, QCheckBox, QRadioButton, QDateEdit)):
                     self.apply_structured_filters(); event.accept(); return
             elif focused_widget == self.query_input:
