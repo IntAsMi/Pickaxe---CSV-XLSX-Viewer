@@ -10,13 +10,7 @@ from PySide6.QtGui import QPainter, QAction, QIcon, QFont, QColor, QDesktopServi
 
 import numpy as np # For .npz files
 import pickle      # For .pkl files
-try:
-    import hickle    # For .hkl files
-    HICKLE_AVAILABLE = True
-except ImportError:
-    HICKLE_AVAILABLE = False
-    print("Warning: 'hickle' library not found. .hkl file support will be disabled.")
-
+import hickle
 import time
 from chardet import detect
 from csv import Sniffer, QUOTE_MINIMAL, excel
@@ -192,7 +186,7 @@ class ContainerFileNavigator:
             if file_type == 'pickle':
                 with open(file_path, 'rb') as f:
                     data_object = pickle.load(f)
-            elif file_type == 'hickle' and HICKLE_AVAILABLE:
+            elif file_type == 'hickle':
                 data_object = hickle.load(file_path)
             else:
                 return [{"name": f"Unsupported type or library missing for {file_type}", "type": "Error", "shape": "N/A"}]
@@ -234,7 +228,7 @@ class ContainerFileNavigator:
             if file_type == 'pickle':
                 with open(file_path, 'rb') as f:
                     data_object = pickle.load(f)
-            elif file_type == 'hickle' and HICKLE_AVAILABLE:
+            elif file_type == 'hickle':
                 data_object = hickle.load(file_path)
             else:
                 raise ValueError(f"Unsupported type or library missing for {file_type}")
@@ -338,11 +332,8 @@ class FileLoaderWorker(QThread): # QThread is good if UI interaction is needed v
                 df = self.handle_pickle_hickle_load(current_path_for_reading, 'pickle')
                 file_info['source_format'] = 'Pickle'
             elif file_ext in ['.hkl', '.hickle'] :
-                if HICKLE_AVAILABLE:
-                    df = self.handle_pickle_hickle_load(current_path_for_reading, 'hickle')
-                    file_info['source_format'] = 'Hickle'
-                else:
-                    raise ValueError("Hickle library not installed. Cannot read .hkl files.")
+                df = self.handle_pickle_hickle_load(current_path_for_reading, 'hickle')
+                file_info['source_format'] = 'Hickle'
             elif file_ext == '.json': 
                 df = pl.read_json(current_path_for_reading)
                 file_info['source_format'] = 'JSON'
@@ -391,10 +382,10 @@ class FileLoaderWorker(QThread): # QThread is good if UI interaction is needed v
             opened_sheet = sheet_name if (sheet_name is not None and sheet_name in list_sheetnames and len(list_sheetnames) > 1) else list_sheetnames[0]
             
             df = pl.read_excel(
-                filename,
+                source = filename,
                 sheet_name=opened_sheet,
                 infer_schema_length=0,
-                read_csv_options={'infer_schema_length': 0} # For polars excel engine
+                read_csv_options={'infer_schema_length': 0}
             )
 
             if nrows is not None and nrows > 0:
@@ -640,8 +631,6 @@ class FileLoaderWorker(QThread): # QThread is good if UI interaction is needed v
         raise ValueError("Pickled object is not a Polars/Pandas DataFrame, NumPy array, or list of dicts.")
 
     def read_hickle(self, file_path):
-        if not HICKLE_AVAILABLE:
-             raise ImportError("Hickle library is not installed. Cannot read .hkl files.")
         data_object = hickle.load(file_path)
         # Similar conversion logic as pickle
         if isinstance(data_object, pl.DataFrame):
