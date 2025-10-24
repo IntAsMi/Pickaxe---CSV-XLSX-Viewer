@@ -349,7 +349,7 @@ class FileLoaderWorker(QThread): # QThread is good if UI interaction is needed v
             else:
                 # If we reach here and df is still None, it means an unhandled extension
                 # or an Excel that wasn't converted (e.g., too small) but also wasn't handled by the Excel block
-                if df is None: 
+                if df is None and current_path_for_reading != '': 
                     raise ValueError(f"Unsupported or unhandled file format: {file_ext}")
 
             if df is not None:
@@ -1495,7 +1495,7 @@ class Pickaxe(QMainWindow):
         self.stats_display_layout.addWidget(self.stats_label, 1)
         self._layout.addLayout(self.stats_display_layout)
         self.model = None
-        self._filepath = Path('')
+        self._filepath = r''
         self.applied_filters_info = []
         self.file_info = {}
         self.current_column_page = 0
@@ -2465,14 +2465,12 @@ class Pickaxe(QMainWindow):
             )
             file_name, _ = QFileDialog.getOpenFileName(self, "Open File", #dir=self.initial_path,
                                                     filter=file_dialog_filter)
-            file_name = Path(str(file_name))
-            
         else:
-            file_name = Path(str(file_path))
+            file_name = file_path
                     
-        if file_name:
+        if isinstance(file_name, str):
             self.initial_path_selected = os.path.dirname(file_name)
-            self._filepath = Path(file_name)
+            self._filepath = file_name
             
             try:
                 log_file_dir = os.path.dirname(os.path.abspath(file_name))
@@ -2481,7 +2479,7 @@ class Pickaxe(QMainWindow):
                 log_filename_for_data = f".__log__{data_basename_no_ext}_{timestamp_str}.md"
                 self.current_log_file_path = os.path.join(log_file_dir, log_filename_for_data)
                 
-                logger.set_log_file(self.current_log_file_path, app_name_for_header="Pickaxe", associated_data_file=file_name.name)
+                logger.set_log_file(self.current_log_file_path, app_name_for_header="Pickaxe", associated_data_file=file_name)
                 logger.log_action("Pickaxe", "Data Session Start", 
                                   f"Initiated processing for data file: {os.path.basename(file_name)}", 
                                   details={"Log File": self.current_log_file_path})
@@ -2489,16 +2487,16 @@ class Pickaxe(QMainWindow):
                 print(f"Error setting up logger for {file_name}: {e}")
                 # Fallback log if specific one fails
                 self.current_log_file_path = os.path.join(os.getcwd(), f".__log__pickaxe_fallback_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md")
-                logger.set_log_file(self.current_log_file_path, app_name_for_header="Pickaxe (Fallback Log)", associated_data_file=file_name.name)
+                logger.set_log_file(self.current_log_file_path, app_name_for_header="Pickaxe (Fallback Log)", associated_data_file=file_name)
 
             sheet_name = None
-            if str(file_name).lower().endswith(('.xlsx', '.xlsm', '.xlsb', '.xls')):
+            if file_name.lower().endswith(('.xlsx', '.xlsm', '.xlsb', '.xls')):
                 try:
                     sheet_names_list = get_sheet_names(file_name)
                     self.sheet_names = sheet_names_list
                     if len(sheet_names_list) > 1:
                         sheet_name_selected, ok = QInputDialog.getItem(self, "Select Sheet", "Choose a sheet:", sheet_names_list, 0, False)
-                        if not ok: self._filepath = Path(''); return
+                        if not ok: self._filepath = None; return
                         sheet_name = sheet_name_selected
                     elif sheet_names_list: sheet_name = sheet_names_list[0]
                     else: self.on_error(f"No sheets found in Excel file: {os.path.basename(file_name)}"); return
@@ -2544,16 +2542,16 @@ class Pickaxe(QMainWindow):
 
     @Slot(object, dict)
     def on_file_loaded(self, df, file_info):
-        
+                
         self.types_suggested_and_applied_this_session = False
         
         if not self.current_log_file_path: # Should have been set in load_file
              # Fallback if somehow not set (e.g. direct call to on_file_loaded without load_file)
             fallback_log_name = f".__log__{os.path.splitext(os.path.basename(self._filepath))[0] if self._filepath else 'unknown_data'}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
             self.current_log_file_path = os.path.join(os.getcwd(), fallback_log_name)
-            logger.set_log_file(self.current_log_file_path, "Pickaxe", associated_data_file=self._filepath.name or "Unknown")
+            logger.set_log_file(self.current_log_file_path, "Pickaxe", associated_data_file=str(self._filepath) or "Unknown")
 
-        if df is None or df.is_empty():
+        if (df is None or df.is_empty()):
             
             logger.log_action(
                 "Pickaxe", "File Load Error", 
@@ -2561,7 +2559,8 @@ class Pickaxe(QMainWindow):
                 details=file_info 
             )
             self.df_shape_before = (0, 0)
-            self.on_error(f"File '{os.path.basename(self._filepath)}' loaded empty or failed.")
+            if isinstance(self._filepath, str):
+                self.on_error(f"File '{os.path.basename(self._filepath)}' loaded empty or failed.")
             self.df = None; self.filtered_df = None
             self.update_model_slot(None, True); self.update_file_info_label()
             self.save_button.setEnabled(False); self.apply_query_button.setEnabled(False)
@@ -2577,20 +2576,22 @@ class Pickaxe(QMainWindow):
         if self.df is not None:
             self.filtered_df = self.df.clone()
 
-        if self._filepath.name.lower().endswith(('.xlsx', '.xlsm', '.xlsb', '.xls')):
-            file_info['total_sheets'] = len(self.sheet_names) if hasattr(self, 'sheet_names') else (1 if file_info.get('sheet_name') else 'N/A')
-        self.file_info = file_info
-        if self.df is not None:
-            self.original_row_count = self.df.height 
-        
-        logger.log_dataframe_load(
-            "Pickaxe",
-            self.file_info.get('filename', self._filepath), 
-            sheet_name=self.file_info.get('sheet_name'),
-            rows=self.file_info.get('rows', df.height), 
-            cols=self.file_info.get('columns', df.width), 
-            load_time_sec=self.file_info.get('load_time', 0)
-        )
+        if self._filepath:
+            if self._filepath.lower().endswith(('.xlsx', '.xlsm', '.xlsb', '.xls')):
+                file_info['total_sheets'] = len(self.sheet_names) if hasattr(self, 'sheet_names') else (1 if file_info.get('sheet_name') else 'N/A')
+            self.file_info = file_info
+            if self.df is not None:
+                self.original_row_count = self.df.height 
+            
+            logger.log_dataframe_load(
+                "Pickaxe",
+                self.file_info.get('filename', self._filepath), 
+                sheet_name=self.file_info.get('sheet_name'),
+                rows=self.file_info.get('rows', df.height), 
+                cols=self.file_info.get('columns', df.width), 
+                load_time_sec=self.file_info.get('load_time', 0)
+            )
+            
         if self.df is not None:
             self.df_shape_before = (self.df.height, self.df.width)
                             
@@ -2615,8 +2616,10 @@ class Pickaxe(QMainWindow):
                 
             self._layout.insertWidget(4, self.filter_panel)
             self.filter_panel.setVisible(False)
+        
+        if isinstance(self._filepath, str):
+            self.update_progress(100, f"File '{os.path.basename(self._filepath)}' loaded.")
             
-        self.update_progress(100, f"File '{os.path.basename(self._filepath)}' loaded.")
         if hasattr(self, 'file_loader_thread') and self.file_loader_thread:
             self.file_loader_thread.quit(); self.file_loader_thread.wait()
 
@@ -3074,7 +3077,7 @@ class Pickaxe(QMainWindow):
 
     def load_dataframe_from_source(self, df_from_source, name_hint, source_log_file_path=None):
         self.statusBar().showMessage(f"Receiving data: {name_hint}", 3000)
-        self._filepath = Path(name_hint) 
+        self._filepath = os.path.abspath(name_hint)
         self.df = df_from_source.clone()
         if "__original_index__" not in self.df.columns:
             self.df = self.df.with_row_count("__original_index__")
@@ -3406,7 +3409,7 @@ class Pickaxe(QMainWindow):
         file_name_base = os.path.basename(self._filepath)
         display_file_name = file_name_base if len(file_name_base) <= 60 else file_name_base[:25] + "..." + file_name_base[-30:]
         file_info_text = f"  File: '{display_file_name}'\n"
-        if self._filepath.name.lower().endswith(('.xlsx', '.xls', '.xlsm', '.xlsb')):
+        if self._filepath.lower().endswith(('.xlsx', '.xls', '.xlsm', '.xlsb')):
             file_info_text += f" Sheet: '{self.file_info.get('sheet_name', 'N/A')}' (Total: {self.file_info.get('total_sheets', 'N/A')}) | "
         else: file_info_text += f" Delimiter: '{self.file_info.get('delimiter', 'N/A')}' | Encoding: '{self.file_info.get('encoding', 'N/A')}' | "
 
