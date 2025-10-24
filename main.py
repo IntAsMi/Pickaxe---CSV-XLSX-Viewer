@@ -12,6 +12,7 @@ import numpy as np # For .npz files
 import pickle      # For .pkl files
 import hickle
 import time
+from pathlib import Path
 from chardet import detect
 from csv import Sniffer, QUOTE_MINIMAL, excel
 from datetime import datetime
@@ -385,7 +386,7 @@ class FileLoaderWorker(QThread): # QThread is good if UI interaction is needed v
                 source = filename,
                 sheet_name=opened_sheet,
                 infer_schema_length=0,
-                read_csv_options={'infer_schema_length': 0}
+                # read_csv_options={'infer_schema_length': 0}
             )
 
             if nrows is not None and nrows > 0:
@@ -660,28 +661,28 @@ class FilledRowsBarWidget(QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         width = self.width()
         height = self.height()
-        painter.fillRect(0, 0, width, height, QColor(Qt.lightGray))
-        fill_color = QColor(Qt.blue)
-        if self.percentage <= 33: fill_color = QColor(Qt.red)
+        painter.fillRect(0, 0, width, height, QColor(Qt.GlobalColor.lightGray))
+        fill_color = QColor(Qt.GlobalColor.blue)
+        if self.percentage <= 33: fill_color = QColor(Qt.GlobalColor.red)
         elif self.percentage <= 66: fill_color = QColor(255, 165, 0)
-        else: fill_color = QColor(Qt.green).darker(150)
+        else: fill_color = QColor(Qt.GlobalColor.green).darker(150)
         filled_width = int(width * self.percentage / 100.0)
         painter.fillRect(0, 0, filled_width, height, fill_color)
         text = f"{self.percentage:.1f}% filled"
         font = painter.font()
         font.setPointSize(max(8, int(height * 0.6)))
         painter.setFont(font)
-        if fill_color == Qt.red or \
-           (fill_color == QColor(Qt.green).darker(150) and self.percentage > 50) or \
+        if fill_color == Qt.GlobalColor.red or \
+           (fill_color == QColor(Qt.GlobalColor.green).darker(150) and self.percentage > 50) or \
            (fill_color == QColor(255,165,0) and self.percentage > 40) :
             if filled_width > painter.fontMetrics().horizontalAdvance(text) / 1.5 :
-                painter.setPen(Qt.white)
-            else: painter.setPen(Qt.black)
-        else: painter.setPen(Qt.black)
-        painter.drawText(self.rect(), Qt.AlignCenter, text)
+                painter.setPen(Qt.GlobalColor.white)
+            else: painter.setPen(Qt.GlobalColor.black)
+        else: painter.setPen(Qt.GlobalColor.black)
+        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, text)
         painter.end()
 
 class FilterWorker(QThread):
@@ -937,7 +938,7 @@ class FilterWidget(QFrame):
 
     def __init__(self, columns, parent=None):
         super().__init__(parent)
-        self.layout = QHBoxLayout(self)
+        self._layout = QHBoxLayout(self)
         fixed_width = 110
         self.column_combo = QComboBox()
 
@@ -974,8 +975,8 @@ class FilterWidget(QFrame):
 
         self.use_regex_checkbox = QCheckBox("Regex")
         self.regex_help_label = QLabel()
-        self.regex_help_label.setTextFormat(Qt.RichText) # Allow HTML
-        self.regex_help_label.setTextInteractionFlags(Qt.TextBrowserInteraction) # Allow clicking links
+        self.regex_help_label.setTextFormat(Qt.TextFormat.RichText) # Allow HTML
+        self.regex_help_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction) # Allow clicking links
         self.regex_help_label.setOpenExternalLinks(True) # Qt will handle opening the link
         self.regex_help_label.setText('<a href="https://www.regexone.com/">Regex Tutorial</a>')
         self.regex_help_label.setToolTip("Click to open regexone.com for a regex tutorial.")
@@ -999,22 +1000,22 @@ class FilterWidget(QFrame):
         self.date_input2.setDate(default_date)
         self.date_input2.setVisible(False)
 
-        self.layout.addWidget(self.column_combo)
-        self.layout.addWidget(self.field_type_switch)
-        self.layout.addWidget(self.comparison_combo)
-        self.layout.addWidget(self.filter_input)
-        self.layout.addWidget(self.filter_input2)
-        self.layout.addWidget(self.date_input)
-        self.layout.addWidget(self.date_input2)
-        self.layout.addWidget(self.case_sensitive_combo)
-        self.layout.addWidget(self.use_regex_checkbox)
-        self.layout.addWidget(self.regex_help_label) # Add the help label to the layout
-        self.layout.addWidget(self.negate_filter_checkbox)
-        self.layout.addWidget(self.remove_button)
+        self._layout.addWidget(self.column_combo)
+        self._layout.addWidget(self.field_type_switch)
+        self._layout.addWidget(self.comparison_combo)
+        self._layout.addWidget(self.filter_input)
+        self._layout.addWidget(self.filter_input2)
+        self._layout.addWidget(self.date_input)
+        self._layout.addWidget(self.date_input2)
+        self._layout.addWidget(self.case_sensitive_combo)
+        self._layout.addWidget(self.use_regex_checkbox)
+        self._layout.addWidget(self.regex_help_label) # Add the help label to the layout
+        self._layout.addWidget(self.negate_filter_checkbox)
+        self._layout.addWidget(self.remove_button)
 
-        self.filter_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.date_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.date_input2.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.filter_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.date_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.date_input2.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
         self.column_combo.currentTextChanged.connect(self.on_column_or_comparison_changed)
         self.field_type_switch.type_changed.connect(self.on_ui_changed_and_emit)
@@ -1133,15 +1134,15 @@ class LogicWidget(QFrame):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.layout = QHBoxLayout(self)
-        self.layout.addStretch()
+        self._layout = QHBoxLayout(self)
+        self._layout.addStretch()
         self.and_radio = QRadioButton("AND")
         self.or_radio = QRadioButton("OR")
         self.and_radio.setChecked(True)
-        self.layout.addWidget(self.and_radio)
-        self.layout.addWidget(self.or_radio)
-        self.layout.addStretch()
-        self.layout.setContentsMargins(0,5,0,5)
+        self._layout.addWidget(self.and_radio)
+        self._layout.addWidget(self.or_radio)
+        self._layout.addStretch()
+        self._layout.setContentsMargins(0,5,0,5)
 
         self.and_radio.toggled.connect(self.logic_changed.emit)
 
@@ -1151,7 +1152,7 @@ class FilterPanel(QWidget):
 
     def __init__(self, columns, parent=None):
         super().__init__(parent)
-        self.layout = QVBoxLayout(self)
+        self._layout = QVBoxLayout(self)
         self.filters = []
         self.logic_widgets = []
         self.columns = columns if columns else []
@@ -1160,7 +1161,7 @@ class FilterPanel(QWidget):
         self.scroll_layout = QVBoxLayout(self.scroll_widget)
         self.scroll_area.setWidget(self.scroll_widget)
         self.scroll_area.setWidgetResizable(True)
-        self.layout.addWidget(self.scroll_area)
+        self._layout.addWidget(self.scroll_area)
         self.button_layout = QHBoxLayout()
         self.add_filter_button = QPushButton("Add Filter Row")
         self.add_filter_button.clicked.connect(self.add_filter)
@@ -1168,7 +1169,7 @@ class FilterPanel(QWidget):
         self.apply_button.setDefault(True)
         self.button_layout.addWidget(self.add_filter_button)
         self.button_layout.addWidget(self.apply_button)
-        self.layout.addLayout(self.button_layout)
+        self._layout.addLayout(self.button_layout)
         if self.columns or True: 
             self.add_filter()
         else:
@@ -1256,9 +1257,9 @@ class PolarsModel(QAbstractTableModel):
     def data_frame(self): return self._data_for_cells # Returns only displayable data
     def rowCount(self, parent=None): return self._row_count
     def columnCount(self, parent=None): return self._column_count
-    def data(self, index, role=Qt.DisplayRole):
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         if self._data_for_cells is not None and index.isValid():
-            if role == Qt.DisplayRole:
+            if role == Qt.ItemDataRole.DisplayRole:
                 try:
                     value = self._data_for_cells[index.row(), index.column()]
                     return str(value) if value is not None else ''
@@ -1266,12 +1267,12 @@ class PolarsModel(QAbstractTableModel):
         return None
 
     @Slot(int, Qt.Orientation, int)
-    def headerData(self, section, orientation, role=Qt.DisplayRole):
-        if role == Qt.DisplayRole:
-            if orientation == Qt.Horizontal:
+    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
+        if role == Qt.ItemDataRole.DisplayRole:
+            if orientation == Qt.Orientation.Horizontal:
                 try: return str(self._column_headers[section])
                 except IndexError: return None
-            if orientation == Qt.Vertical:
+            if orientation == Qt.Orientation.Vertical:
                 try: return str(self._index_headers[section])
                 except IndexError: return None
         return None
@@ -1343,7 +1344,7 @@ class Pickaxe(QMainWindow):
         self.context_menu_selected_column_names = []
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
-        self.layout = QVBoxLayout(self.central_widget)
+        self._layout = QVBoxLayout(self.central_widget)
         
         self.top_button_layout = QHBoxLayout()
         self.file_button = QPushButton("Open File")
@@ -1401,14 +1402,14 @@ class Pickaxe(QMainWindow):
         self.top_button_layout.addWidget(self.vw_button)
         self.top_button_layout.addWidget(self.suggest_conversions_button)
         # self.top_button_layout.addWidget(self.suggest_conversions_button)
-        self.layout.addLayout(self.top_button_layout)
+        self._layout.addLayout(self.top_button_layout)
         self.info_layout = QHBoxLayout()
         self.file_info_label = QLabel("Load a file to see details.")
         self.file_info_label.setWordWrap(True)
         self.column_range_label = QLabel()
         self.info_layout.addWidget(self.file_info_label, 2)
         self.info_layout.addWidget(self.column_range_label, 1)
-        self.layout.addLayout(self.info_layout)
+        self._layout.addLayout(self.info_layout)
 
         self.query_filter_layout = QHBoxLayout()
         self.query_input = QLineEdit()
@@ -1419,9 +1420,9 @@ class Pickaxe(QMainWindow):
         self.completer = QCompleter(self)
         self.completer_model = QStringListModel(self)
         self.completer.setModel(self.completer_model)
-        self.completer.setCaseSensitivity(Qt.CaseInsensitive)
-        self.completer.setCompletionMode(QCompleter.PopupCompletion)
-        self.completer.setFilterMode(Qt.MatchContains)
+        self.completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self.completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+        self.completer.setFilterMode(Qt.MatchFlag.MatchContains)
         self.query_input.setCompleter(self.completer)
         self.update_completer_model()
 
@@ -1440,7 +1441,7 @@ class Pickaxe(QMainWindow):
         self.query_filter_layout.addWidget(self.query_input)
         self.query_filter_layout.addWidget(self.apply_query_button)
         self.query_filter_layout.addWidget(self.query_help_button)
-        self.layout.addLayout(self.query_filter_layout)
+        self._layout.addLayout(self.query_filter_layout)
 
         self.filter_panel = None
         self.filter_nav_layout = QHBoxLayout()
@@ -1463,37 +1464,37 @@ class Pickaxe(QMainWindow):
         self.nav_button_layout.addWidget(self.prev_columns_button)
         self.nav_button_layout.addWidget(self.next_columns_button)
         self.filter_nav_layout.addLayout(self.nav_button_layout) # Add as a sub-layout
-        self.layout.addLayout(self.filter_nav_layout)
+        self._layout.addLayout(self.filter_nav_layout)
 
 
         self.table_view = QTableView()
-        self.table_view.setVerticalScrollMode(QTableView.ScrollPerPixel)
-        self.table_view.setHorizontalScrollMode(QTableView.ScrollPerPixel)
-        self.table_view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table_view.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.table_view.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.table_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table_view.customContextMenuRequested.connect(self.show_context_menu)
-        self.layout.addWidget(self.table_view)
+        self._layout.addWidget(self.table_view)
         self.table_view.horizontalHeader().setSectionsClickable(True)
-        self.table_view.horizontalHeader().setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.table_view.horizontalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table_view.horizontalHeader().setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.table_view.horizontalHeader().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table_view.horizontalHeader().customContextMenuRequested.connect(self.show_header_context_menu)
         self.stats_display_layout = QHBoxLayout()
         self.filled_rows_bar = FilledRowsBarWidget()
         self.filled_rows_bar.setFixedSize(120, 20)
-        self.stats_display_layout.addWidget(self.filled_rows_bar, 0, Qt.AlignVCenter)
+        self.stats_display_layout.addWidget(self.filled_rows_bar, 0, Qt.AlignmentFlag.AlignVCenter)
         self.stats_label = QLabel("Select a column to see statistics.")
-        self.stats_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.stats_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.stats_label.setMinimumHeight(40)
         self.stats_label.setWordWrap(True)
-        self.stats_label.setTextFormat(Qt.RichText) # <<< SET TO RICH TEXT
-        self.stats_label.setTextInteractionFlags(Qt.TextBrowserInteraction) # Optional: if you ever add links
+        self.stats_label.setTextFormat(Qt.TextFormat.RichText) # <<< SET TO RICH TEXT
+        self.stats_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction) # Optional: if you ever add links
         self.stats_label.setOpenExternalLinks(True) # Optional
         font = self.stats_label.font()
         font.setPointSize(9)
         self.stats_label.setFont(font)
         self.stats_display_layout.addWidget(self.stats_label, 1)
-        self.layout.addLayout(self.stats_display_layout)
+        self._layout.addLayout(self.stats_display_layout)
         self.model = None
-        self._filepath = None
+        self._filepath = Path('')
         self.applied_filters_info = []
         self.file_info = {}
         self.current_column_page = 0
@@ -1503,8 +1504,8 @@ class Pickaxe(QMainWindow):
         self.progress_bar.setVisible(False)
         self.progress_label = QLabel()
         self.progress_label.setVisible(False)
-        self.layout.addWidget(self.progress_bar)
-        self.layout.addWidget(self.progress_label)
+        self._layout.addWidget(self.progress_bar)
+        self._layout.addWidget(self.progress_label)
         self.save_button.setEnabled(False)
         self.apply_query_button.setEnabled(False)
         self.filter_toggle_button.setEnabled(False)
@@ -1564,15 +1565,15 @@ class Pickaxe(QMainWindow):
     def _style_button(self, button):
         # Create a simple "logo" for the button
         pixmap = QPixmap(24, 24)
-        pixmap.fill(Qt.transparent)
+        pixmap.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         colors = [QColor("dodgerblue"), QColor("mediumseagreen"), QColor("tomato"), QColor("gold")]
         rect_size = 10
         offsets = [(0,0), (rect_size+2,0), (0, rect_size+2), (rect_size+2, rect_size+2)]
         for i in range(4):
             painter.setBrush(colors[i])
-            painter.setPen(Qt.NoPen)
+            painter.setPen(Qt.PenStyle.NoPen)
             painter.drawRoundedRect(offsets[i][0], offsets[i][1], rect_size, rect_size, 2, 2)
         painter.end()
         button.setIcon(QIcon(pixmap))
@@ -2028,7 +2029,7 @@ class Pickaxe(QMainWindow):
         
         # Join all parts. Use <br> for newlines in HTML.
         # The stats_label needs to support RichText.
-        self.stats_label.setTextFormat(Qt.RichText)
+        self.stats_label.setTextFormat(Qt.TextFormat.RichText)
         self.stats_label.setText("<br>".join(stats_text_parts))
         self.set_stats_label_font_monospaced() # Monospace is good for table-like text
                                 
@@ -2037,8 +2038,8 @@ class Pickaxe(QMainWindow):
         families = ["Courier New", "Consolas", "DejaVu Sans Mono", "Menlo"]
         for family in families:
             font.setFamily(family)
-            if QFont(font.family()).styleHint() == QFont.Monospace: break
-        else: font.setStyleHint(QFont.Monospace)
+            if QFont(font.family()).styleHint() == QFont.StyleHint.Monospace: break
+        else: font.setStyleHint(QFont.StyleHint.Monospace)
         font.setPointSize(9)
         self.stats_label.setFont(font)
 
@@ -2154,8 +2155,8 @@ class Pickaxe(QMainWindow):
             if significant_new_nans:
                 reply = QMessageBox.question(self, "Conversion Warning",
                                              f"Converting '{column_name_to_convert}' to {type_name} resulted in a significant number of new empty values. Proceed?",
-                                             QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-                if reply == QMessageBox.No:
+                                             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+                if reply == QMessageBox.StandardButton.No:
                     self.update_progress(0, "Conversion cancelled.")
                     self.progress_bar.setVisible(False); self.progress_label.setVisible(False)
                     return
@@ -2307,11 +2308,11 @@ class Pickaxe(QMainWindow):
 
 
                 if significant_new_nans and not yes_to_all_warnings:
-                    msg_box = QMessageBox(self); msg_box.setIcon(QMessageBox.Warning)
+                    msg_box = QMessageBox(self); msg_box.setIcon(QMessageBox.warning)
                     msg_box.setWindowTitle(f"Conversion Warning for '{col_name}'")
                     msg_box.setText(f"Converting '{col_name}' to {type_name} resulted in {newly_created_nulls} new empty/null values. Proceed with this column?")
-                    yes_button = msg_box.addButton("Yes", QMessageBox.YesRole); no_button = msg_box.addButton("No", QMessageBox.NoRole)
-                    yes_all_button = msg_box.addButton("Yes to All", QMessageBox.AcceptRole); cancel_all_button = msg_box.addButton("Cancel All", QMessageBox.RejectRole)
+                    yes_button = msg_box.addButton("Yes", QMessageBox.ButtonRole.YesRole); no_button = msg_box.addButton("No", QMessageBox.ButtonRole.NoRole)
+                    yes_all_button = msg_box.addButton("Yes to All", QMessageBox.ButtonRole.AcceptRole); cancel_all_button = msg_box.addButton("Cancel All", QMessageBox.ButtonRole.RejectRole)
                     msg_box.setDefaultButton(yes_button); msg_box.exec()
                     
                     clicked_btn = msg_box.clickedButton()
@@ -2455,12 +2456,14 @@ class Pickaxe(QMainWindow):
             )
             file_name, _ = QFileDialog.getOpenFileName(self, "Open File", #dir=self.initial_path,
                                                     filter=file_dialog_filter)
+            file_name = Path(str(file_name))
+            
         else:
-            file_name = file_path
+            file_name = Path(str(file_path))
                     
         if file_name:
             self.initial_path_selected = os.path.dirname(file_name)
-            self._filepath = file_name
+            self._filepath = Path(file_name)
             
             try:
                 log_file_dir = os.path.dirname(os.path.abspath(file_name))
@@ -2469,7 +2472,7 @@ class Pickaxe(QMainWindow):
                 log_filename_for_data = f".__log__{data_basename_no_ext}_{timestamp_str}.md"
                 self.current_log_file_path = os.path.join(log_file_dir, log_filename_for_data)
                 
-                logger.set_log_file(self.current_log_file_path, app_name_for_header="Pickaxe", associated_data_file=file_name)
+                logger.set_log_file(self.current_log_file_path, app_name_for_header="Pickaxe", associated_data_file=file_name.name)
                 logger.log_action("Pickaxe", "Data Session Start", 
                                   f"Initiated processing for data file: {os.path.basename(file_name)}", 
                                   details={"Log File": self.current_log_file_path})
@@ -2477,16 +2480,16 @@ class Pickaxe(QMainWindow):
                 print(f"Error setting up logger for {file_name}: {e}")
                 # Fallback log if specific one fails
                 self.current_log_file_path = os.path.join(os.getcwd(), f".__log__pickaxe_fallback_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md")
-                logger.set_log_file(self.current_log_file_path, app_name_for_header="Pickaxe (Fallback Log)", associated_data_file=file_name)
+                logger.set_log_file(self.current_log_file_path, app_name_for_header="Pickaxe (Fallback Log)", associated_data_file=file_name.name)
 
             sheet_name = None
-            if file_name.lower().endswith(('.xlsx', '.xlsm', '.xlsb', '.xls')):
+            if str(file_name).lower().endswith(('.xlsx', '.xlsm', '.xlsb', '.xls')):
                 try:
                     sheet_names_list = get_sheet_names(file_name)
                     self.sheet_names = sheet_names_list
                     if len(sheet_names_list) > 1:
                         sheet_name_selected, ok = QInputDialog.getItem(self, "Select Sheet", "Choose a sheet:", sheet_names_list, 0, False)
-                        if not ok: self._filepath = None; return
+                        if not ok: self._filepath = Path(''); return
                         sheet_name = sheet_name_selected
                     elif sheet_names_list: sheet_name = sheet_names_list[0]
                     else: self.on_error(f"No sheets found in Excel file: {os.path.basename(file_name)}"); return
@@ -2523,9 +2526,9 @@ class Pickaxe(QMainWindow):
                                        f"Could not open '{os.path.basename(filename)}' directly.\n\n"
                                        "This can happen with very large or complex files.\n\n"
                                        "Do you want to try converting it to a temporary CSV file and loading that instead?",
-                                       QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                                       QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
         
-        choice = (reply == QMessageBox.Yes)
+        choice = (reply == QMessageBox.StandardButton.Yes)
         
         if hasattr(self.file_loader_thread, 'on_excel_conversion_choice_relayed'):
             self.file_loader_thread.on_excel_conversion_choice_relayed(choice)
@@ -2539,7 +2542,7 @@ class Pickaxe(QMainWindow):
              # Fallback if somehow not set (e.g. direct call to on_file_loaded without load_file)
             fallback_log_name = f".__log__{os.path.splitext(os.path.basename(self._filepath))[0] if self._filepath else 'unknown_data'}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
             self.current_log_file_path = os.path.join(os.getcwd(), fallback_log_name)
-            logger.set_log_file(self.current_log_file_path, "Pickaxe", associated_data_file=self._filepath or "Unknown")
+            logger.set_log_file(self.current_log_file_path, "Pickaxe", associated_data_file=self._filepath.name or "Unknown")
 
         if df is None or df.is_empty():
             
@@ -2564,7 +2567,7 @@ class Pickaxe(QMainWindow):
         
         self.filtered_df = self.df.clone()
 
-        if self._filepath.lower().endswith(('.xlsx', '.xlsm', '.xlsb', '.xls')):
+        if self._filepath.name.lower().endswith(('.xlsx', '.xlsm', '.xlsb', '.xls')):
             file_info['total_sheets'] = len(self.sheet_names) if hasattr(self, 'sheet_names') else (1 if file_info.get('sheet_name') else 'N/A')
         self.file_info = file_info
         self.original_row_count = self.df.height 
@@ -2598,7 +2601,7 @@ class Pickaxe(QMainWindow):
             self.filter_panel.setEnabled(False)
             self.filter_toggle_button.setEnabled(False)
             
-        self.layout.insertWidget(4, self.filter_panel)
+        self._layout.insertWidget(4, self.filter_panel)
         self.filter_panel.setVisible(False)
         self.update_progress(100, f"File '{os.path.basename(self._filepath)}' loaded.")
         if hasattr(self, 'file_loader_thread') and self.file_loader_thread:
@@ -2743,12 +2746,12 @@ class Pickaxe(QMainWindow):
         header_layout = QHBoxLayout()
         header_layout.addWidget(QLabel("<b>Column Name</b>"), 2)
         # New Order: String/Key, Category, Boolean, Integer, Numeric (Float), Datetime
-        header_layout.addWidget(QLabel("<b>String/Key</b>"), 1, alignment=Qt.AlignCenter)
-        header_layout.addWidget(QLabel("<b>Category</b>"), 1, alignment=Qt.AlignCenter)
-        header_layout.addWidget(QLabel("<b>Boolean</b>"), 1, alignment=Qt.AlignCenter) # New
-        header_layout.addWidget(QLabel("<b>Integer</b>"), 1, alignment=Qt.AlignCenter)
-        header_layout.addWidget(QLabel("<b>Numeric (Float)</b>"), 1, alignment=Qt.AlignCenter)
-        header_layout.addWidget(QLabel("<b>Datetime</b>"), 1, alignment=Qt.AlignCenter)
+        header_layout.addWidget(QLabel("<b>String/Key</b>"), 1, alignment=Qt.AlignmentFlag.AlignCenter)
+        header_layout.addWidget(QLabel("<b>Category</b>"), 1, alignment=Qt.AlignmentFlag.AlignCenter)
+        header_layout.addWidget(QLabel("<b>Boolean</b>"), 1, alignment=Qt.AlignmentFlag.AlignCenter) # New
+        header_layout.addWidget(QLabel("<b>Integer</b>"), 1, alignment=Qt.AlignmentFlag.AlignCenter)
+        header_layout.addWidget(QLabel("<b>Numeric (Float)</b>"), 1, alignment=Qt.AlignmentFlag.AlignCenter)
+        header_layout.addWidget(QLabel("<b>Datetime</b>"), 1, alignment=Qt.AlignmentFlag.AlignCenter)
         dialog_layout.addLayout(header_layout)
 
         scroll_area = QScrollArea()
@@ -2779,12 +2782,12 @@ class Pickaxe(QMainWindow):
             else: string_rb.setChecked(True) 
 
             grid_layout.addWidget(col_name_label, row_idx, 0)
-            grid_layout.addWidget(string_rb, row_idx, 1, alignment=Qt.AlignCenter)
-            grid_layout.addWidget(category_rb, row_idx, 2, alignment=Qt.AlignCenter)
-            grid_layout.addWidget(boolean_rb, row_idx, 3, alignment=Qt.AlignCenter) # New
-            grid_layout.addWidget(integer_rb, row_idx, 4, alignment=Qt.AlignCenter)
-            grid_layout.addWidget(float_rb, row_idx, 5, alignment=Qt.AlignCenter)
-            grid_layout.addWidget(datetime_rb, row_idx, 6, alignment=Qt.AlignCenter)
+            grid_layout.addWidget(string_rb, row_idx, 1, alignment=Qt.AlignmentFlag.AlignCenter)
+            grid_layout.addWidget(category_rb, row_idx, 2, alignment=Qt.AlignmentFlag.AlignCenter)
+            grid_layout.addWidget(boolean_rb, row_idx, 3, alignment=Qt.AlignmentFlag.AlignCenter) # New
+            grid_layout.addWidget(integer_rb, row_idx, 4, alignment=Qt.AlignmentFlag.AlignCenter)
+            grid_layout.addWidget(float_rb, row_idx, 5, alignment=Qt.AlignmentFlag.AlignCenter)
+            grid_layout.addWidget(datetime_rb, row_idx, 6, alignment=Qt.AlignmentFlag.AlignCenter)
 
 
             self.conversion_radio_button_groups.append(
@@ -2802,7 +2805,7 @@ class Pickaxe(QMainWindow):
         help_button.setToolTip("Help on Data Types")
         help_button.clicked.connect(self._show_type_conversion_help) 
         
-        dialog_buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        dialog_buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         dialog_buttons.accepted.connect(dialog.accept)
         dialog_buttons.rejected.connect(dialog.reject)
 
@@ -2882,7 +2885,7 @@ class Pickaxe(QMainWindow):
             # If user cancels suggest_types, we might still proceed or not
             if not self.types_suggested_and_applied_this_session: # Check if they actually applied changes
                 if QMessageBox.question(self, "Proceed?", "Proceed to Visual Workshop without applying type suggestions?",
-                                        QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.No:
+                                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No) == QMessageBox.StandardButton.No:
                     self.statusBar().showMessage("Visual Workshop launch cancelled.", 2000)
                 else:
                     if self.visual_workshop_window is not None and self.visual_workshop_window.isVisible():
@@ -2959,10 +2962,10 @@ class Pickaxe(QMainWindow):
         
         help_dialog = QMessageBox(self)
         help_dialog.setWindowTitle("Data Type Conversion Help")
-        help_dialog.setTextFormat(Qt.RichText) 
+        help_dialog.setTextFormat(Qt.TextFormat.RichText) 
         help_dialog.setText(help_text)
-        help_dialog.setIcon(QMessageBox.Information)
-        help_dialog.setStandardButtons(QMessageBox.Ok)
+        help_dialog.setIcon(QMessageBox.Icon.Information)
+        help_dialog.setStandardButtons(QMessageBox.StandardButton.Ok)
         # Make dialog wider to better display help text
         help_dialog.setStyleSheet("QTextEdit{ min-width: 450px; min-height: 300px}")
         help_dialog.exec()
@@ -3003,7 +3006,7 @@ class Pickaxe(QMainWindow):
             # except RuntimeError: pass
             self.table_view.selectionModel().currentColumnChanged.connect(self.handle_column_selection_for_stats)
 
-        self.table_view.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        self.table_view.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.table_view.verticalHeader().setDefaultSectionSize(8)
         self.update_column_range_label(df_to_display) # Pass the full df_to_display for accurate total counts
 
@@ -3056,7 +3059,7 @@ class Pickaxe(QMainWindow):
 
     def load_dataframe_from_source(self, df_from_source, name_hint, source_log_file_path=None):
         self.statusBar().showMessage(f"Receiving data: {name_hint}", 3000)
-        self._filepath = name_hint 
+        self._filepath = Path(name_hint) 
         self.df = df_from_source.clone()
         if "__original_index__" not in self.df.columns:
             self.df = self.df.with_row_count("__original_index__")
@@ -3235,7 +3238,7 @@ class Pickaxe(QMainWindow):
         # Create a small dialog or message box offering multiple links
         msg_box = QMessageBox(self)
         msg_box.setWindowTitle("Polars Query Help")
-        msg_box.setTextFormat(Qt.RichText) # Allow HTML for links
+        msg_box.setTextFormat(Qt.TextFormat.RichText) # Allow HTML for links
         msg_box.setText(
             "<b>Polars Expressions:</b><br>"
             "<a href='https://docs.pola.rs/user-guide/expressions/'>Official Polars Expression Guide</a><br><br>"
@@ -3243,7 +3246,7 @@ class Pickaxe(QMainWindow):
             "Used in Polars string functions like <code>.str.contains(r'pattern')</code>, <code>.str.extract()</code>, etc.<br>"
             "Learn Regex at: <a href='https://www.regexone.com/'>regexone.com</a>"
         )
-        msg_box.setStandardButtons(QMessageBox.Ok)
+        msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
         msg_box.exec()
 
     def update_column_range_label(self, df_with_potential_index):
@@ -3366,7 +3369,7 @@ class Pickaxe(QMainWindow):
             self.filter_panel = FilterPanel(new_panel_cols)
             self.filter_panel.panel_filters_changed.connect(self.update_query_input_from_structured_filters)
             self.filter_panel.apply_button.clicked.connect(self.apply_structured_filters)
-            self.layout.insertWidget(4, self.filter_panel)
+            self._layout.insertWidget(4, self.filter_panel)
             self.filter_panel.setVisible(False); self.filter_panel.setEnabled(True); self.filter_toggle_button.setEnabled(True)
             self.update_query_input_from_structured_filters()
 
@@ -3410,7 +3413,7 @@ class Pickaxe(QMainWindow):
         self.file_info_label.setText(file_info_text.strip())
 
     def keyPressEvent(self, event):
-        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             focused_widget = QApplication.focusWidget()
             if self.filter_panel and self.filter_panel.isVisible() and self.filter_panel.isAncestorOf(focused_widget):
                 if isinstance(focused_widget, (QLineEdit, QComboBox, QCheckBox, QRadioButton, QDateEdit)):
@@ -3443,11 +3446,11 @@ class Pickaxe(QMainWindow):
                                        "Would you like to run type suggestions before opening Visual Workshop?\n"
                                        "Should you like to run type suggestions, click 'Yes' and open Visual Workshop afterwards.\n"
                                        "(This can improve plotting accuracy for some columns).",
-                                       QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
-                                       QMessageBox.No)
-            if reply == QMessageBox.Yes:
+                                       QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
+                                       QMessageBox.StandardButton.No)
+            if reply == QMessageBox.StandardButton.Yes:
                 self.suggest_and_convert_types()
-            elif reply == QMessageBox.Cancel:
+            elif reply == QMessageBox.StandardButton.Cancel:
                 self.statusBar().showMessage("Visual Workshop launch cancelled.", 2000)
                 return
         else:
@@ -3466,10 +3469,11 @@ class Pickaxe(QMainWindow):
                             details={"Data Hint": file_hint, "Data Shape": current_df.shape if current_df is not None else "N/A"})
 
         # Always send the current data and log path when showing
-        self.visual_workshop_window.receive_dataframe(current_df, file_hint, log_file_path_from_source=self.current_log_file_path)
-        self.visual_workshop_window.show()
-        self.visual_workshop_window.raise_()
-        self.visual_workshop_window.activateWindow()
+        if self.visual_workshop_window:
+            self.visual_workshop_window.receive_dataframe(current_df, file_hint, log_file_path_from_source=self.current_log_file_path)
+            self.visual_workshop_window.show()
+            self.visual_workshop_window.raise_()
+            self.visual_workshop_window.activateWindow()
 
     def closeEvent(self, event):
         # First, handle potential child windows like VW and DT
@@ -3493,10 +3497,10 @@ class Pickaxe(QMainWindow):
         if self.df is not None and not self.df.is_empty(): # Check if there's data
             reply = QMessageBox.question(self, 'Confirm Exit',
                                            "Do you want to save your current data before closing Pickaxe?",
-                                           QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
-                                           QMessageBox.Cancel) # Default to Cancel
+                                           QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
+                                           QMessageBox.StandardButton.Cancel) # Default to Cancel
 
-            if reply == QMessageBox.Yes:
+            if reply == QMessageBox.StandardButton.Yes:
                 # Attempt to save. self.save_file() opens a dialog.
                 # We need to know if the save was successful or if the user cancelled the save dialog.
                 # Modify save_file to return a status or check if _filepath was updated.
@@ -3516,17 +3520,17 @@ class Pickaxe(QMainWindow):
                 # Let's make save_file return a boolean
                 save_success = self.save_file_for_close_event() # A new method to handle this
                 if save_success is None: # User cancelled the "do you want to save" dialog itself
-                    event.ignore() # This case is handled by QMessageBox.Cancel
+                    event.ignore() # This case is handled by QMessageBox.StandardButton.Cancel
                 elif save_success: # Save was successful OR user chose not to save in the save_file dialog
                     logger.log_action("Pickaxe", "Application Close", "User chose to save (or cancelled save dialog) and then closed.")
                     event.accept()
                 else: # Save was attempted but failed, or save_file itself indicated a reason not to close (e.g. explicit cancel)
                     event.ignore() # Don't close if save failed or was explicitly cancelled from save_file dialog
 
-            elif reply == QMessageBox.No:
+            elif reply == QMessageBox.StandardButton.No:
                 logger.log_action("Pickaxe", "Application Close", "User chose not to save and closed.")
                 event.accept() # Close without saving
-            else: # QMessageBox.Cancel or user closed the dialog
+            else: # QMessageBox.StandardButton.Cancel or user closed the dialog
                 logger.log_action("Pickaxe", "Application Close", "User cancelled closing.")
                 event.ignore() # Don't close
         else:
