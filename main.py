@@ -2231,7 +2231,7 @@ class Pickaxe(QMainWindow):
         yes_to_all_warnings = False
         df_shape_before_batch_op = 0
         
-        if self.df:
+        if self.df is not None:
             
             df_shape_before_batch_op = self.df.shape if not (self.df.is_empty()) else None
 
@@ -2359,7 +2359,7 @@ class Pickaxe(QMainWindow):
         self.update_progress(100, f"Batch {type_name} conversion finished.")
         self.types_suggested_and_applied_this_session = True
 
-        if self.df:
+        if self.df is not None:
             df_shape_after_batch_op = self.df.shape if not self.df.is_empty() else None
         else:
             df_shape_after_batch_op = 0
@@ -2574,13 +2574,13 @@ class Pickaxe(QMainWindow):
         if "__original_index__" not in df.columns:
             self.df = df.with_row_count("__original_index__") # Add original index
         
-        if self.df:
+        if self.df is not None:
             self.filtered_df = self.df.clone()
 
         if self._filepath.name.lower().endswith(('.xlsx', '.xlsm', '.xlsb', '.xls')):
             file_info['total_sheets'] = len(self.sheet_names) if hasattr(self, 'sheet_names') else (1 if file_info.get('sheet_name') else 'N/A')
         self.file_info = file_info
-        if self.df:
+        if self.df is not None:
             self.original_row_count = self.df.height 
         
         logger.log_dataframe_load(
@@ -2591,7 +2591,7 @@ class Pickaxe(QMainWindow):
             cols=self.file_info.get('columns', df.width), 
             load_time_sec=self.file_info.get('load_time', 0)
         )
-        if self.df:
+        if self.df is not None:
             self.df_shape_before = (self.df.height, self.df.width)
                             
         self.applied_filters_info = []
@@ -2601,7 +2601,7 @@ class Pickaxe(QMainWindow):
             self.filter_panel.panel_filters_changed.disconnect(self.update_query_input_from_structured_filters)
             self.filter_panel.deleteLater(); self.filter_panel = None
 
-        if self.df:
+        if self.df is not None:
             columns_for_panel = [c for c in self.df.columns if c != "__original_index__"]
             self.filter_panel = FilterPanel(columns_for_panel)
             self.filter_panel.panel_filters_changed.connect(self.update_query_input_from_structured_filters)
@@ -2646,7 +2646,7 @@ class Pickaxe(QMainWindow):
             self.dt_button.setEnabled(False)
             self.suggest_conversions_button.setEnabled(False) # Disable new button
             
-        if self.df:
+        if self.df is not None:
             displayable_width = len([c for c in self.df.columns if c != "__original_index__"])
             self.prev_columns_button.setEnabled(displayable_width > self.columns_per_page)
             self.next_columns_button.setEnabled(displayable_width > self.columns_per_page)
@@ -2842,7 +2842,7 @@ class Pickaxe(QMainWindow):
         for col_label, str_rb, cat_rb, bool_rb, int_rb, flt_rb, dt_rb in self.conversion_radio_button_groups:
             col_name_to_convert = col_label.text()
             
-            if self.df:
+            if self.df is not None:
                 current_col_dtype = self.df.schema[col_name_to_convert]
                 if flt_rb.isChecked() and not isinstance(current_col_dtype, (pl.Float32, pl.Float64)):
                     cols_to_float.append(col_name_to_convert)
@@ -3159,7 +3159,7 @@ class Pickaxe(QMainWindow):
     @Slot(str)
     def on_save_completed(self, file_name_cb):
         
-        if self.df:
+        if self.df is not None:
             logger.log_dataframe_save(
                 "Pickaxe", file_name_cb,
                 rows=getattr(self, 'df_to_save_op_ref', self.df).height, 
