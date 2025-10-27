@@ -24,14 +24,7 @@ from datetime import datetime, date
 from main import FileLoaderWorker, ContainerFileNavigator, PolarsModel, resource_path
 from operation_logger import logger
 import traceback
-
-# For bij_match
-try:
-    from fuzzywuzzy import fuzz, process
-    FUZZYWUZZY_AVAILABLE = True
-except ImportError:
-    FUZZYWUZZY_AVAILABLE = False
-    print("Warning: fuzzywuzzy library not found. Advanced column name matching for concatenation will be limited.")
+from fuzzywuzzy import fuzz, process
 import collections
 
 
@@ -68,7 +61,7 @@ class ShiftClickCheckboxListWidget(QListWidget):
         modifiers = QApplication.keyboardModifiers()
         target_state = checkbox.isChecked() # The new state of the clicked checkbox
 
-        if Qt.ShiftModifier & modifiers and self.anchor_index != -1 and self.anchor_index != current_index:
+        if Qt.KeyboardModifier.ShiftModifier & modifiers and self.anchor_index != -1 and self.anchor_index != current_index:
             # Shift key is pressed, and a valid anchor exists, and it's not the same item
             self.is_handling_shift_click = True # Set re-entrancy guard
 
@@ -108,7 +101,7 @@ class PolarsSyntaxHighlighter(QSyntaxHighlighter):
         # 1. Polars module functions (e.g., pl.col, pl.lit)
         pl_function_format = QTextCharFormat()
         pl_function_format.setForeground(QColor("#0000CD")) # MediumBlue
-        pl_function_format.setFontWeight(QFont.Bold)
+        pl_function_format.setFontWeight(QFont.Weight.Bold)
         pl_functions = [
             "pl\\.col", "pl\\.lit", "pl\\.when", "pl\\.all", "pl\\.sum", "pl\\.mean", "pl\\.min", "pl\\.max",
             "pl\\.count", "pl\\.first", "pl\\.last", "pl\\.head", "pl\\.tail", "pl\\.select", "pl\\.filter",
@@ -130,7 +123,7 @@ class PolarsSyntaxHighlighter(QSyntaxHighlighter):
         # 3. Keywords (True, False, None, and common operators as words)
         keyword_format = QTextCharFormat()
         keyword_format.setForeground(QColor("darkblue"))
-        keyword_format.setFontWeight(QFont.Bold)
+        keyword_format.setFontWeight(QFont.Weight.Bold)
         keywords = ["True", "False", "None", "and", "or", "not", "in", "is", "as", "if", "else", "then", "otherwise"]
         for word in keywords:
             pattern = QRegularExpression(f"\\b{word}\\b")
@@ -154,7 +147,7 @@ class PolarsSyntaxHighlighter(QSyntaxHighlighter):
         # 5. Operators
         operator_format = QTextCharFormat()
         operator_format.setForeground(QColor("#B22222")) # Firebrick
-        operator_format.setFontWeight(QFont.Normal)
+        operator_format.setFontWeight(QFont.Weight.Normal)
         operators = ["=", "==", "!=", "<", "<=", ">", ">=", "\\+", "-", "\\*", "/", "%", "&", "\\|", "~", "\\^", "\\*\\*"]
         for op in operators:
             pattern = QRegularExpression(re.escape(op) if len(op)==1 and op not in ['&','|','~','^'] else op)
@@ -184,7 +177,7 @@ class PolarsSyntaxHighlighter(QSyntaxHighlighter):
         # 9. Parentheses, Brackets, Braces
         punctuation_format = QTextCharFormat()
         punctuation_format.setForeground(QColor("darkGray"))
-        punctuation_format.setFontWeight(QFont.Bold)
+        punctuation_format.setFontWeight(QFont.Weight.Bold)
         for punc in ["\\(", "\\)", "\\[", "\\]", "\\{", "\\}"]: # Escaped for regex
             pattern = QRegularExpression(punc)
             self.highlighting_rules.append({"pattern": pattern, "format": punctuation_format})
@@ -268,7 +261,7 @@ def bij_match(reference_cols, target_cols, ignore_not_found=False, score_thresho
         if norm_target_key not in used_norm_target_cols
     ]
 
-    if FUZZYWUZZY_AVAILABLE and unmatched_orig_ref_cols and available_orig_target_cols_for_fuzzy:
+    if unmatched_orig_ref_cols and available_orig_target_cols_for_fuzzy:
         for orig_ref_col in unmatched_orig_ref_cols:
             if not available_orig_target_cols_for_fuzzy:
                 final_mapping[orig_ref_col] = None
@@ -429,7 +422,7 @@ class DataTransformer(QMainWindow):
         self.df_info_label = QLabel(f"Current Data: {os.path.basename(self.df_name_hint)} | Dimensions: N/A")
         main_v_layout.addWidget(self.df_info_label)
 
-        self.splitter = QSplitter(Qt.Vertical)
+        self.splitter = QSplitter(Qt.Orientation.Vertical)
         main_v_layout.addWidget(self.splitter)
 
         self.tab_widget = QTabWidget()
@@ -442,14 +435,14 @@ class DataTransformer(QMainWindow):
         preview_layout = QVBoxLayout(preview_group)
 
         self.preview_df_title_label = QLabel("<b>Preview: No Data</b>")
-        self.preview_df_title_label.setAlignment(Qt.AlignCenter)
+        self.preview_df_title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         preview_layout.addWidget(self.preview_df_title_label)
 
         self.preview_table = QTableView()
         self.preview_table.setAlternatingRowColors(True)
-        self.preview_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.preview_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.preview_table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        self.preview_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.preview_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.preview_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.preview_table.horizontalHeader().setStretchLastSection(False)
         preview_layout.addWidget(self.preview_table)
 
@@ -463,7 +456,7 @@ class DataTransformer(QMainWindow):
         nav_layout.addWidget(self.prev_page_button)
 
         self.page_info_label = QLabel("Page 0/0")
-        self.page_info_label.setAlignment(Qt.AlignCenter)
+        self.page_info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         nav_layout.addWidget(self.page_info_label)
 
         self.next_page_button = QPushButton("Next >")
@@ -484,7 +477,7 @@ class DataTransformer(QMainWindow):
         self.create_modify_tab = QWidget()
         main_layout = QHBoxLayout(self.create_modify_tab)
 
-        self.create_fields_main_splitter = QSplitter(Qt.Horizontal)
+        self.create_fields_main_splitter = QSplitter(Qt.Orientation.Horizontal)
         main_layout.addWidget(self.create_fields_main_splitter)
 
         self.helper_groupbox = QGroupBox("Polars Expression Helper & Examples")
@@ -504,13 +497,13 @@ class DataTransformer(QMainWindow):
         self.toggle_helper_button.setCheckable(True)
         self.toggle_helper_button.setChecked(True)
         self.toggle_helper_button.clicked.connect(self._toggle_polars_helper)
-        right_pane_main_layout.addWidget(self.toggle_helper_button, 0, Qt.AlignRight)
+        right_pane_main_layout.addWidget(self.toggle_helper_button, 0, Qt.AlignmentFlag.AlignRight)
 
-        self.create_fields_right_pane_splitter = QSplitter(Qt.Vertical)
+        self.create_fields_right_pane_splitter = QSplitter(Qt.Orientation.Vertical)
         right_pane_main_layout.addWidget(self.create_fields_right_pane_splitter)
 
         top_right_widget = QWidget()
-        self.top_right_columns_expressions_splitter = QSplitter(Qt.Horizontal, top_right_widget)
+        self.top_right_columns_expressions_splitter = QSplitter(Qt.Orientation.Horizontal, top_right_widget)
 
         layout_for_top_right_splitter = QHBoxLayout(top_right_widget)
         layout_for_top_right_splitter.addWidget(self.top_right_columns_expressions_splitter)
@@ -532,11 +525,11 @@ class DataTransformer(QMainWindow):
         self.applied_expressions_log_table = QTableWidget()
         self.applied_expressions_log_table.setColumnCount(3)
         self.applied_expressions_log_table.setHorizontalHeaderLabels(["Field Name", "Expression", "Use"])
-        self.applied_expressions_log_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.applied_expressions_log_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.applied_expressions_log_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self.applied_expressions_log_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        self.applied_expressions_log_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.applied_expressions_log_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.applied_expressions_log_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.applied_expressions_log_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.applied_expressions_log_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.applied_expressions_log_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         applied_expr_layout.addWidget(self.applied_expressions_log_table)
         self.top_right_columns_expressions_splitter.addWidget(self.applied_expressions_group)
 
@@ -553,7 +546,7 @@ class DataTransformer(QMainWindow):
         self.new_field_name_edit.setPlaceholderText("e.g., 'new_col' or 'existing_col_to_overwrite'")
         input_layout.addWidget(self.new_field_name_edit, 0, 1)
 
-        input_layout.addWidget(QLabel("Polars Expression:"), 1, 0, Qt.AlignTop)
+        input_layout.addWidget(QLabel("Polars Expression:"), 1, 0, Qt.AlignmentFlag.AlignTop)
         self.polars_expression_edit = QTextEdit()
         self.polars_expression_edit.setPlaceholderText("e.g., pl.col('some_col') + pl.col('other_col')")
         self.polars_expression_edit.setMinimumHeight(120)
@@ -574,18 +567,48 @@ class DataTransformer(QMainWindow):
         self.tab_widget.addTab(self.create_modify_tab, "Create/Modify Fields")
 
     def _populate_polars_helper_text(self):
-        html_content = """
+        # Get current palette to determine if we're in dark mode
+        palette = self.palette()
+        bg_color = palette.color(palette.ColorRole.Base)
+        text_color = palette.color(palette.ColorRole.Text)
+        
+        # Simple dark mode detection based on background lightness
+        is_dark_mode = bg_color.lightness() < 128
+        
+        if is_dark_mode:
+            # Dark theme colors
+            body_color = "#e0e0e0"
+            heading_color = "#64b5f6"
+            border_color = "#555"
+            code_bg = "#3a3a3a"
+            code_color = "#ffcc80"
+            code_block_bg = "#2d2d2d"
+            link_color = "#81c784"
+            link_hover_color = "#a5d6a7"
+        else:
+            # Light theme colors (original)
+            body_color = "#000000"
+            heading_color = "#2c3e50"
+            border_color = "#ccc"
+            code_bg = "#e9e9e9"
+            code_color = "#000000"
+            code_block_bg = "#f4f4f4"
+            link_color = "#3498db"
+            link_hover_color = "#2980b9"
+        
+        html_content = f"""
         <html><head><style>
-            body { font-family: sans-serif; font-size: 9pt; margin: 5px; }
-            h4 { color: #2c3e50; margin-bottom: 3px; margin-top: 10px; border-bottom: 1px solid #ccc; padding-bottom: 2px;}
-            p { margin-top: 2px; margin-bottom: 6px; }
-            code { background-color: #e9e9e9; padding: 2px 4px; border-radius: 3px; font-family: Consolas, 'Courier New', monospace;}
-            .code-block { background-color: #f4f4f4; border: 1px solid #ddd; padding: 6px; margin: 6px 0; border-radius: 3px; font-family: Consolas, 'Courier New', monospace; white-space: pre-wrap; font-size: 8.5pt; }
-            ul { padding-left: 20px; margin-top: 2px; margin-bottom: 8px;}
-            li { margin-bottom: 3px; }
-            a { color: #3498db; text-decoration: none; }
-            a:hover { text-decoration: underline; }
+            body {{ font-family: sans-serif; font-size: 9pt; margin: 5px; color: {body_color}; }}
+            h4 {{ color: {heading_color}; margin-bottom: 3px; margin-top: 10px; border-bottom: 1px solid {border_color}; padding-bottom: 2px;}}
+            p {{ margin-top: 2px; margin-bottom: 6px; }}
+            code {{ background-color: {code_bg}; color: {code_color}; padding: 2px 4px; border-radius: 3px; font-family: Consolas, 'Courier New', monospace; border: 1px solid {border_color};}}
+            .code-block {{ background-color: {code_block_bg}; border: 1px solid {border_color}; color: {body_color}; padding: 6px; margin: 6px 0; border-radius: 3px; font-family: Consolas, 'Courier New', monospace; white-space: pre-wrap; font-size: 8.5pt; }}
+            ul {{ padding-left: 20px; margin-top: 2px; margin-bottom: 8px;}}
+            li {{ margin-bottom: 3px; }}
+            a {{ color: {link_color}; text-decoration: none; }}
+            a:hover {{ text-decoration: underline; color: {link_hover_color}; }}
         </style></head><body>
+        """ + """
         <h4>Core Concepts:</h4>
         <ul>
             <li>Select Column: <code>pl.col("ColumnName")</code> (Excel: <code>A1</code> or named range)</li>
@@ -701,7 +724,7 @@ class DataTransformer(QMainWindow):
         pivot_group = QGroupBox("Pivot Configuration")
         pivot_layout = QGridLayout(pivot_group)
 
-        pivot_layout.addWidget(QLabel("Index Column(s) (Rows in Excel Pivot):"), 0, 0, Qt.AlignTop)
+        pivot_layout.addWidget(QLabel("Index Column(s) (Rows in Excel Pivot):"), 0, 0, Qt.AlignmentFlag.AlignTop)
         self.pivot_index_cols_list = self._create_checkbox_list_widget()
         pivot_layout.addWidget(self.pivot_index_cols_list, 0, 1, 1, 2)
 
@@ -728,14 +751,14 @@ class DataTransformer(QMainWindow):
         pivot_layout.addWidget(self.apply_pivot_button, 3, 0, 1, 3)
 
         self.pivot_diagram_label = QLabel("<i>Diagram: Select options to see transformation preview.</i>")
-        self.pivot_diagram_label.setAlignment(Qt.AlignCenter)
+        self.pivot_diagram_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.pivot_diagram_label.setWordWrap(True)
         self.pivot_diagram_label.setStyleSheet("font-style: italic; color: gray; margin-top: 5px; border: 1px dashed #ccc; padding: 5px;")
         pivot_layout.addWidget(self.pivot_diagram_label, 4, 0, 1, 3)
 
         self.revert_pivot_button = QPushButton("Revert Last Pivot")
         self.revert_pivot_button.clicked.connect(self._handle_revert_last_pivot)
-        pivot_layout.addWidget(self.revert_pivot_button, 5, 0, 1, 3, Qt.AlignCenter)
+        pivot_layout.addWidget(self.revert_pivot_button, 5, 0, 1, 3, Qt.AlignmentFlag.AlignCenter)
 
         pivot_main_layout.addWidget(pivot_group)
         pivot_main_layout.addStretch()
@@ -782,14 +805,14 @@ class DataTransformer(QMainWindow):
         melt_layout.addWidget(self.apply_melt_button, 2, 0, 1, 4)
 
         self.melt_diagram_label = QLabel("<i>Diagram: Select options to see transformation preview.</i>")
-        self.melt_diagram_label.setAlignment(Qt.AlignCenter)
+        self.melt_diagram_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.melt_diagram_label.setWordWrap(True)
         self.melt_diagram_label.setStyleSheet("font-style: italic; color: gray; margin-top: 5px; border: 1px dashed #ccc; padding: 5px;")
         melt_layout.addWidget(self.melt_diagram_label, 3, 0, 1, 4)
 
         self.revert_melt_button = QPushButton("Revert Last Melt")
         self.revert_melt_button.clicked.connect(self._handle_revert_last_melt)
-        melt_layout.addWidget(self.revert_melt_button, 4, 0, 1, 4, Qt.AlignCenter)
+        melt_layout.addWidget(self.revert_melt_button, 4, 0, 1, 4, Qt.AlignmentFlag.AlignCenter)
 
         melt_main_layout.addWidget(melt_group)
         melt_main_layout.addStretch()
@@ -864,11 +887,11 @@ class DataTransformer(QMainWindow):
         self.merge_key_mapping_table = QTableWidget()
         self.merge_key_mapping_table.setColumnCount(3)
         self.merge_key_mapping_table.setHorizontalHeaderLabels(["Use for Join", "Current DF Key", "'Other' DF Key"])
-        self.merge_key_mapping_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.merge_key_mapping_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self.merge_key_mapping_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
-        self.merge_key_mapping_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.merge_key_mapping_table.setSelectionBehavior(QAbstractItemView.SelectRows) # For row deletion
+        self.merge_key_mapping_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.merge_key_mapping_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.merge_key_mapping_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.merge_key_mapping_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.merge_key_mapping_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows) # For row deletion
         keys_layout.addWidget(self.merge_key_mapping_table)
 
         key_buttons_layout = QHBoxLayout()
@@ -898,7 +921,7 @@ class DataTransformer(QMainWindow):
 
         self.apply_merge_button = QPushButton("Apply Merge/Join")
         self.apply_merge_button.clicked.connect(self._handle_apply_merge)
-        layout.addWidget(self.apply_merge_button, alignment=Qt.AlignCenter)
+        layout.addWidget(self.apply_merge_button, alignment=Qt.AlignmentFlag.AlignCenter)
         layout.addStretch()
         self.combine_operations_tab_widget.addTab(sub_tab, "Merge / Join")
         self._populate_merge_key_mapping_table() # Initial population
@@ -924,7 +947,7 @@ class DataTransformer(QMainWindow):
         chk_box = QCheckBox()
         chk_box.setChecked(True)
         chk_layout.addWidget(chk_box)
-        chk_layout.setAlignment(Qt.AlignCenter)
+        chk_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         chk_layout.setContentsMargins(0,0,0,0)
         self.merge_key_mapping_table.setCellWidget(current_row_count, 0, chk_use_widget)
 
@@ -933,8 +956,8 @@ class DataTransformer(QMainWindow):
         combo_left.addItem(self.MERGE_KEY_PLACEHOLDER)
         if self.current_df is not None:
             combo_left.addItems(self.current_df.columns)
-        if left_key_preselect and left_key_preselect in self.current_df.columns:
-            combo_left.setCurrentText(left_key_preselect)
+            if left_key_preselect and left_key_preselect in self.current_df.columns:
+                combo_left.setCurrentText(left_key_preselect)
         self.merge_key_mapping_table.setCellWidget(current_row_count, 1, combo_left)
 
         # ComboBox for Other DF Key
@@ -942,8 +965,8 @@ class DataTransformer(QMainWindow):
         combo_right.addItem(self.MERGE_KEY_PLACEHOLDER)
         if self.other_df_for_combine is not None:
             combo_right.addItems(self.other_df_for_combine.columns)
-        if right_key_preselect and right_key_preselect in self.other_df_for_combine.columns:
-            combo_right.setCurrentText(right_key_preselect)
+            if right_key_preselect and right_key_preselect in self.other_df_for_combine.columns:
+                combo_right.setCurrentText(right_key_preselect)
         self.merge_key_mapping_table.setCellWidget(current_row_count, 2, combo_right)
         self.merge_key_mapping_table.resizeRowsToContents()
 
@@ -999,8 +1022,9 @@ class DataTransformer(QMainWindow):
         for row in range(self.merge_key_mapping_table.rowCount()):
             use_checkbox_widget = self.merge_key_mapping_table.cellWidget(row, 0)
             use_this_pair = False
-            if use_checkbox_widget and isinstance(use_checkbox_widget.layout().itemAt(0).widget(), QCheckBox):
-                use_this_pair = use_checkbox_widget.layout().itemAt(0).widget().isChecked()
+            if use_checkbox_widget:
+                if isinstance(use_checkbox_widget.layout().itemAt(0).widget(), QCheckBox):
+                    use_this_pair = use_checkbox_widget.layout().itemAt(0).widget().isChecked()
 
             if not use_this_pair:
                 continue
@@ -1010,7 +1034,7 @@ class DataTransformer(QMainWindow):
 
             if not left_combo or not right_combo:
                 valid_mapping = False; break 
-
+            
             left_key = left_combo.currentText()
             right_key = right_combo.currentText()
 
@@ -1039,7 +1063,7 @@ class DataTransformer(QMainWindow):
         top_label_layout.addWidget(concat_help_button)
         main_concat_layout.addLayout(top_label_layout)
 
-        concat_splitter = QSplitter(Qt.Horizontal)
+        concat_splitter = QSplitter(Qt.Orientation.Horizontal)
         main_concat_layout.addWidget(concat_splitter, 1)
 
         options_widget = QWidget()
@@ -1077,11 +1101,11 @@ class DataTransformer(QMainWindow):
         self.concat_column_mapping_table = QTableWidget()
         self.concat_column_mapping_table.setColumnCount(4)
         self.concat_column_mapping_table.setHorizontalHeaderLabels(["Include", "Current DF Column", "Maps To (Other DF)", "Output Name"])
-        self.concat_column_mapping_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.concat_column_mapping_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self.concat_column_mapping_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
-        self.concat_column_mapping_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
-        self.concat_column_mapping_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.concat_column_mapping_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.concat_column_mapping_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.concat_column_mapping_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.concat_column_mapping_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self.concat_column_mapping_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         concat_mapping_layout.addWidget(self.concat_column_mapping_table)
 
         self.refresh_mapping_button = QPushButton("Refresh / Auto-Match Column Mapping")
@@ -1094,7 +1118,7 @@ class DataTransformer(QMainWindow):
 
         self.apply_concat_button = QPushButton("Apply Concatenate")
         self.apply_concat_button.clicked.connect(self._handle_apply_concat)
-        main_concat_layout.addWidget(self.apply_concat_button, 0, Qt.AlignCenter)
+        main_concat_layout.addWidget(self.apply_concat_button, 0, Qt.AlignmentFlag.AlignCenter)
 
         self.combine_operations_tab_widget.addTab(self.concat_sub_tab, "Concatenate")
         self._on_concat_type_changed()
@@ -1147,12 +1171,12 @@ class DataTransformer(QMainWindow):
             chk_include = QCheckBox()
             chk_include.setChecked(True)
             chk_include_layout.addWidget(chk_include)
-            chk_include_layout.setAlignment(Qt.AlignCenter)
+            chk_include_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
             chk_include_layout.setContentsMargins(0,0,0,0)
             self.concat_column_mapping_table.setCellWidget(row, 0, chk_include_widget)
 
             item_current_col = QTableWidgetItem(current_col_name)
-            item_current_col.setFlags(item_current_col.flags() & ~Qt.ItemIsEditable)
+            item_current_col.setFlags(item_current_col.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.concat_column_mapping_table.setItem(row, 1, item_current_col)
 
             combo_maps_to = QComboBox(self.concat_column_mapping_table)
@@ -1256,7 +1280,7 @@ class DataTransformer(QMainWindow):
             try:
                 fm = self.preview_df_title_label.fontMetrics()
                 available_width = self.preview_table.viewport().width() if self.preview_table.viewport() else 400
-                elided_name = fm.elidedText(base_name, Qt.ElideRight, max(100, available_width - 20))
+                elided_name = fm.elidedText(base_name, Qt.TextElideMode.ElideRight, max(100, available_width - 20))
                 self.preview_df_title_label.setText(f"<b>Preview: {elided_name}</b>")
             except Exception:
                  self.preview_df_title_label.setText(f"<b>Preview: {base_name[:50]}{'...' if len(base_name) > 50 else ''}</b>")
@@ -1310,7 +1334,7 @@ class DataTransformer(QMainWindow):
 
         if self.other_df_for_combine is not None:
             dims_other = f"{self.other_df_for_combine.height}R x {self.other_df_for_combine.width}C"
-            self.other_df_info_label.setText(f"Other DF: {os.path.basename(self.other_df_name_hint)} | {dims_other}")
+            self.other_df_info_label.setText(f"Other DF: {os.path.basename(self.other_df_name_hint) if self.other_df_name_hint else ""} | {dims_other}")
         else:
             self.other_df_info_label.setText("Other DF: Not loaded")
 
@@ -1405,7 +1429,7 @@ class DataTransformer(QMainWindow):
     def _create_checkbox_list_widget(self):
         # list_widget = QListWidget() # Old line
         list_widget = ShiftClickCheckboxListWidget() # New line
-        list_widget.setSelectionMode(QAbstractItemView.NoSelection)
+        list_widget.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         return list_widget
 
     def _populate_checkbox_list_widget(self, list_widget: ShiftClickCheckboxListWidget, df: pl.DataFrame = None, check_all=False): # Hint type for clarity
@@ -1635,7 +1659,7 @@ class DataTransformer(QMainWindow):
 
             html_output = "<h3>DataFrame Description:</h3>"
             try:
-                html_output += description_df.to_html(notebook=False, max_rows=-1)
+                html_output += description_df.to_pandas().to_html(notebook=False, max_rows=-1)
             except AttributeError:
                 html_output += f"<pre>{str(description_df)}</pre>"
             except Exception as e_html:
@@ -1650,7 +1674,7 @@ class DataTransformer(QMainWindow):
             text_browser.setHtml(html_output)
             layout.addWidget(text_browser)
 
-            button_box = QDialogButtonBox(QDialogButtonBox.Ok)
+            button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
             button_box.accepted.connect(desc_dialog.accept)
             layout.addWidget(button_box)
             desc_dialog.exec()
@@ -1837,7 +1861,17 @@ class DataTransformer(QMainWindow):
             self._show_error_message("Delete Error", "No columns selected for deletion.")
             return
 
-        if not self._confirm_action("Confirm Deletion", f"Are you sure you want to permanently delete the selected column(s): {', '.join(selected_cols_to_delete)}?"):
+        list_of_files_for_del, i = '', 0
+        while (list_of_files_for_del.__len__()<100) & (i <= (selected_cols_to_delete.__len__()-1)):            
+            if i == selected_cols_to_delete.__len__():
+                list_of_files_for_del = ' &, '.join([list_of_files_for_del, selected_cols_to_delete[i]])
+            else:
+                list_of_files_for_del = ', '.join([list_of_files_for_del, selected_cols_to_delete[i]])
+            i += 1
+        if i <= selected_cols_to_delete.__len__():
+            list_of_files_for_del = ','.join([list_of_files_for_del, '... '])
+            
+        if not self._confirm_action("Confirm Deletion", f"Are you sure you want to permanently delete the selected column(s): {list_of_files_for_del}?"):
             return
 
         df_shape_before = self.current_df.shape
@@ -1982,13 +2016,13 @@ class DataTransformer(QMainWindow):
             if agg_func_str not in ["first", "last", "list", "count"]:
                 if values_col in temp_df.columns:
                     current_dtype = temp_df.schema[values_col]
-                    if not isinstance(current_dtype, (pl.NUMERIC_DTYPES)):
+                    if not isinstance(current_dtype, (pl.Int8, pl.Int16, pl.Int32, pl.Int64, pl.UInt8, pl.UInt16, pl.UInt32, pl.UInt64, pl.Float32, pl.Float64)):
                         temp_df = temp_df.with_columns(pl.col(values_col).cast(pl.Float64, strict=False))
                         self.status_bar.showMessage(f"Note: Pivot values column '{values_col}' temporarily cast to Float for aggregation.", 3000)
 
             self.current_df = temp_df.pivot(
                 index=index_cols,
-                columns=columns_col,
+                on=columns_col,
                 values=values_col,
                 aggregate_function=agg_func_str
             )
@@ -2340,7 +2374,7 @@ class DataTransformer(QMainWindow):
             if current_df_select_exprs:
                 current_df_to_concat = current_df_to_concat.select(current_df_select_exprs)
             elif mapping_config:
-                current_df_to_concat = pl.DataFrame().with_height(other_df_to_concat.height if not other_df_to_concat.is_empty() else current_df_to_concat.height)
+                current_df_to_concat = pl.DataFrame().with_row_index(other_df_to_concat.height if not other_df_to_concat.is_empty() else current_df_to_concat.height)
 
 
             selected_other_cols_with_aliases = {}
@@ -2359,7 +2393,7 @@ class DataTransformer(QMainWindow):
             if other_df_select_exprs_intermediate:
                 other_df_to_concat = other_df_to_concat.select(other_df_select_exprs_intermediate)
             else:
-                 other_df_to_concat = pl.DataFrame().with_height(current_df_to_concat.height if not current_df_to_concat.is_empty() else other_df_to_concat.height)
+                 other_df_to_concat = pl.DataFrame().with_row_index(current_df_to_concat.height if not current_df_to_concat.is_empty() else other_df_to_concat.height)
 
 
         elif polars_how_from_ui == "custom_vertical_common":
@@ -2476,7 +2510,7 @@ class DataTransformer(QMainWindow):
                 suggested_conversions.append((col_name, current_suggestion))
                 continue
 
-            if series.dtype in pl.INTEGER_DTYPES:
+            if series.dtype in (pl.Int8, pl.Int16, pl.Int32, pl.Int64, pl.UInt8, pl.UInt16, pl.UInt32, pl.UInt64):
                 current_suggestion = "integer"
             elif series.dtype in pl.FLOAT_DTYPES:
                 current_suggestion = "numeric_float"
@@ -2516,7 +2550,7 @@ class DataTransformer(QMainWindow):
                     try:
                         _ = non_null_series.cast(pl.Int64, strict=True)
                         current_suggestion = "integer"
-                    except pl.PolarsError:
+                    except pl.exceptions.PolarsError:
                         try:
                             casted_float_for_int_check = non_null_series.cast(pl.Float64, strict=False)
                             non_null_casted_float = casted_float_for_int_check.drop_nulls()
@@ -2555,12 +2589,12 @@ class DataTransformer(QMainWindow):
 
         header_layout = QHBoxLayout()
         header_layout.addWidget(QLabel("<b>Column Name</b>"), 2)
-        header_layout.addWidget(QLabel("<b>String/Key</b>"), 1, alignment=Qt.AlignCenter)
-        header_layout.addWidget(QLabel("<b>Category</b>"), 1, alignment=Qt.AlignCenter)
-        header_layout.addWidget(QLabel("<b>Boolean</b>"), 1, alignment=Qt.AlignCenter)
-        header_layout.addWidget(QLabel("<b>Integer</b>"), 1, alignment=Qt.AlignCenter)
-        header_layout.addWidget(QLabel("<b>Numeric (Float)</b>"), 1, alignment=Qt.AlignCenter)
-        header_layout.addWidget(QLabel("<b>Datetime</b>"), 1, alignment=Qt.AlignCenter)
+        header_layout.addWidget(QLabel("<b>String/Key</b>"), 1, alignment=Qt.AlignmentFlag.AlignCenter)
+        header_layout.addWidget(QLabel("<b>Category</b>"), 1, alignment=Qt.AlignmentFlag.AlignCenter)
+        header_layout.addWidget(QLabel("<b>Boolean</b>"), 1, alignment=Qt.AlignmentFlag.AlignCenter)
+        header_layout.addWidget(QLabel("<b>Integer</b>"), 1, alignment=Qt.AlignmentFlag.AlignCenter)
+        header_layout.addWidget(QLabel("<b>Numeric (Float)</b>"), 1, alignment=Qt.AlignmentFlag.AlignCenter)
+        header_layout.addWidget(QLabel("<b>Datetime</b>"), 1, alignment=Qt.AlignmentFlag.AlignCenter)
         dialog_layout.addLayout(header_layout)
 
         scroll_area = QScrollArea()
@@ -2589,12 +2623,12 @@ class DataTransformer(QMainWindow):
             else: string_rb.setChecked(True)
 
             grid_layout.addWidget(col_name_label, row_idx, 0)
-            grid_layout.addWidget(string_rb, row_idx, 1, alignment=Qt.AlignCenter)
-            grid_layout.addWidget(category_rb, row_idx, 2, alignment=Qt.AlignCenter)
-            grid_layout.addWidget(boolean_rb, row_idx, 3, alignment=Qt.AlignCenter)
-            grid_layout.addWidget(integer_rb, row_idx, 4, alignment=Qt.AlignCenter)
-            grid_layout.addWidget(float_rb, row_idx, 5, alignment=Qt.AlignCenter)
-            grid_layout.addWidget(datetime_rb, row_idx, 6, alignment=Qt.AlignCenter)
+            grid_layout.addWidget(string_rb, row_idx, 1, alignment=Qt.AlignmentFlag.AlignCenter)
+            grid_layout.addWidget(category_rb, row_idx, 2, alignment=Qt.AlignmentFlag.AlignCenter)
+            grid_layout.addWidget(boolean_rb, row_idx, 3, alignment=Qt.AlignmentFlag.AlignCenter)
+            grid_layout.addWidget(integer_rb, row_idx, 4, alignment=Qt.AlignmentFlag.AlignCenter)
+            grid_layout.addWidget(float_rb, row_idx, 5, alignment=Qt.AlignmentFlag.AlignCenter)
+            grid_layout.addWidget(datetime_rb, row_idx, 6, alignment=Qt.AlignmentFlag.AlignCenter)
 
             self.other_df_conversion_radio_button_groups.append(
                 (col_name_label, string_rb, category_rb, boolean_rb, integer_rb, float_rb, datetime_rb)
@@ -2611,7 +2645,7 @@ class DataTransformer(QMainWindow):
         help_button.setToolTip("Help on Data Types")
         help_button.clicked.connect(self._show_type_conversion_help_for_other_df)
 
-        dialog_buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        dialog_buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         dialog_buttons.accepted.connect(dialog.accept)
         dialog_buttons.rejected.connect(dialog.reject)
 
@@ -2623,7 +2657,7 @@ class DataTransformer(QMainWindow):
         dialog.setMinimumWidth(750)
         dialog.setMinimumHeight(400)
 
-        if dialog.exec() == QDialog.Accepted:
+        if dialog.exec() == QDialog.DialogCode.Accepted:
             cols_to_float, cols_to_int, cols_to_datetime, cols_to_category, cols_to_string, cols_to_boolean = [], [], [], [], [], []
 
             for col_label, str_rb, cat_rb, bool_rb, int_rb, flt_rb, dt_rb in self.other_df_conversion_radio_button_groups:
@@ -2632,9 +2666,9 @@ class DataTransformer(QMainWindow):
                     continue
                 current_col_dtype = self.other_df_for_combine.schema[col_name_to_convert]
 
-                if flt_rb.isChecked() and not isinstance(current_col_dtype, pl.FLOAT_DTYPES):
+                if flt_rb.isChecked() and not isinstance(current_col_dtype, (pl.Float32, pl.Float64)):
                     cols_to_float.append(col_name_to_convert)
-                elif int_rb.isChecked() and not isinstance(current_col_dtype, pl.INTEGER_DTYPES):
+                elif int_rb.isChecked() and not isinstance(current_col_dtype, (pl.Int8, pl.Int16, pl.Int32, pl.Int64, pl.UInt8, pl.UInt16, pl.UInt32, pl.UInt64)):
                     cols_to_int.append(col_name_to_convert)
                 elif dt_rb.isChecked() and not isinstance(current_col_dtype, (pl.Date, pl.Datetime, pl.Time, pl.Duration)):
                     cols_to_datetime.append(col_name_to_convert)
@@ -2774,11 +2808,11 @@ class DataTransformer(QMainWindow):
                     significant_new_nans = False
 
                 if significant_new_nans and not yes_to_all_warnings:
-                    msg_box = QMessageBox(self); msg_box.setIcon(QMessageBox.Warning)
+                    msg_box = QMessageBox(self); msg_box.setIcon(QMessageBox.Icon.Warning)
                     msg_box.setWindowTitle(f"Conversion Warning for '{col_name}' (Other DF)")
                     msg_box.setText(f"Converting '{col_name}' to {type_name} may result in {newly_created_nulls} new empty/null values. Proceed with this column?")
-                    yes_button = msg_box.addButton("Yes", QMessageBox.YesRole); no_button = msg_box.addButton("No", QMessageBox.NoRole)
-                    yes_all_button = msg_box.addButton("Yes to All", QMessageBox.AcceptRole); cancel_all_button = msg_box.addButton("Cancel All", QMessageBox.RejectRole)
+                    yes_button = msg_box.addButton("Yes", QMessageBox.StandardButton.YesRole); no_button = msg_box.addButton("No", QMessageBox.StandardButton.NoRole)
+                    yes_all_button = msg_box.addButton("Yes to All", QMessageBox.ButtonRole.AcceptRole); cancel_all_button = msg_box.addButton("Cancel All", QMessageBox.ButtonRole.RejectRole)
                     msg_box.setDefaultButton(yes_button); msg_box.exec()
 
                     clicked_btn = msg_box.clickedButton()
@@ -2858,10 +2892,10 @@ class DataTransformer(QMainWindow):
         """
         help_dialog = QMessageBox(self)
         help_dialog.setWindowTitle("Data Type Conversion Help (Other DF)")
-        help_dialog.setTextFormat(Qt.RichText)
+        help_dialog.setTextFormat(Qt.TextFormat.RichText)
         help_dialog.setText(help_text)
-        help_dialog.setIcon(QMessageBox.Information)
-        help_dialog.setStandardButtons(QMessageBox.Ok)
+        help_dialog.setIcon(QMessageBox.Icon.Information)
+        help_dialog.setStandardButtons(QMessageBox.StandardButton.Ok)
         help_dialog.exec()
 
     def _create_help_dialog(self, title, html_content):
@@ -2873,7 +2907,7 @@ class DataTransformer(QMainWindow):
         text_browser.setHtml(html_content)
         text_browser.setOpenExternalLinks(True)
         layout.addWidget(text_browser)
-        button_box = QDialogButtonBox(QDialogButtonBox.Ok)
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
         button_box.accepted.connect(dialog.accept)
         layout.addWidget(button_box)
         dialog.exec()
@@ -3041,23 +3075,23 @@ joined_df = current_df.join(other_df,
         self.status_bar.showMessage(f"Error: {message[:100]}", 5000)
 
     def _confirm_action(self, title, message):
-        reply = QMessageBox.question(self, title, message, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        return reply == QMessageBox.Yes
+        reply = QMessageBox.question(self, title, message, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+        return reply == QMessageBox.StandardButton.Yes
 
     def closeEvent(self, event):
         if self.undo_stack:
             reply = QMessageBox.question(self, "Confirm Exit",
                                            "You have unsaved transformations. Do you want to save the current data before exiting?",
-                                           QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
-                                           QMessageBox.Cancel)
-            if reply == QMessageBox.Save:
+                                           QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                                           QMessageBox.StandardButton.Cancel)
+            if reply == QMessageBox.StandardButton.Save:
                 save_successful = self._handle_save_file()
                 if save_successful is False:
                     event.ignore()
                     return
                 logger.log_action("DataTransformer", "Application Close", "User chose to save transformations upon exit.")
                 event.accept()
-            elif reply == QMessageBox.Discard:
+            elif reply == QMessageBox.StandardButton.Discard:
                 logger.log_action("DataTransformer", "Application Close", "User chose to discard transformations upon exit.")
                 event.accept()
             else:
@@ -3069,6 +3103,11 @@ joined_df = current_df.join(other_df,
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
+    app.setStyle('Fusion')
+    app.desktopSettingsAware()
+    icon_path = resource_path("settings.ico")
+    app_icon = QIcon(icon_path)           
+    app.setWindowIcon(app_icon)            
 
     class DummySourceApp(QWidget):
         def __init__(self):
