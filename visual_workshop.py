@@ -18,7 +18,7 @@ from matplotlib.patches import Circle
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qt import NavigationToolbar2QT as NavigationToolbar
 from matplotlib.dates import AutoDateFormatter, AutoDateLocator
-
+import matplotlib.ticker as mticker
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QComboBox, QScrollArea, QGroupBox, QSplitter,
@@ -188,8 +188,6 @@ class PlotGenerationWorker(QThread):
         
         palette = self._get_seaborn_kwargs(basic, adv).get('palette')
 
-        
-        
         dodge = True
         if hue_col and basic.get('barmode') == 'Stack':
             
@@ -260,7 +258,7 @@ class PlotGenerationWorker(QThread):
                 self.plot_status_update.emit(f"Invalid colormap: '{cmap_name}'. Using default.")
 
         wedges, texts, autotexts = ax.pie(values, labels=labels, autopct='%1.1f%%', 
-                                          explode=explode, shadow=True, startangle=90,
+                                          explode=explode, shadow=False, startangle=90,
                                           colors=colors)
         
         if basic.get('is_donut'):
@@ -268,20 +266,27 @@ class PlotGenerationWorker(QThread):
         
         ax.axis('equal')
         
+        palette = self._get_seaborn_kwargs(basic, adv).get('palette')
 
     def _draw_histogram(self, ax, df, basic, adv):
-        sns.histplot(data=df, x=basic.get('x_col'), weights=basic.get('y_col') if basic.get('y_col') != 'None' else None,
+        sns.histplot(data=df, 
+                     x=basic.get('x_col'), 
+                     weights=basic.get('y_col') if basic.get('y_col') != 'None' else None,
                      hue=basic.get('color_col') if basic.get('color_col') != 'None' else None,
-                     bins=basic.get('nbinsx') or 'auto', kde=basic.get('add_kde', False),
-                     cumulative=basic.get('cumulative_enabled', False), stat=basic.get('histnorm', 'count').lower(),
-                     ax=ax, **self._get_seaborn_kwargs(basic, adv))
+                     bins=basic.get('nbinsx') or 'auto', 
+                     kde=basic.get('add_kde', False),
+                     cumulative=basic.get('cumulative_enabled', False), 
+                     stat=basic.get('histnorm', 'count').lower(),
+                     ax=ax,
+                     palette=self._get_seaborn_kwargs(basic, adv).get('palette'))
 
     def _draw_box(self, ax, df, basic, adv):
         orient = 'v' if basic.get('orientation') == 'Vertical' else 'h'
         x, y = (basic.get('x_col'), basic.get('y_col')) if orient == 'v' else (basic.get('y_col'), basic.get('x_col'))
         if x == 'None': x = None
         sns.boxplot(data=df, x=x, y=y, hue=basic.get('color_col') if basic.get('color_col') != 'None' else None,
-                    orient=orient, notch=basic.get('notched', False), ax=ax, **self._get_seaborn_kwargs(basic, adv))
+                    orient=orient, notch=basic.get('notched', False), ax=ax,
+                    palette=self._get_seaborn_kwargs(basic, adv).get('palette'))
 
     def _draw_violin(self, ax, df, basic, adv):
         orient = 'v' if basic.get('orientation') == 'Vertical' else 'h'
@@ -301,19 +306,22 @@ class PlotGenerationWorker(QThread):
                     self.plot_status_update.emit("Split-by column must have exactly 2 unique values. Not splitting.")
         
         sns.violinplot(data=df, x=x, y=y, hue=hue, split=split, orient=orient, 
-                       inner='box' if basic.get('box_visible') else 'quartile', ax=ax, **self._get_seaborn_kwargs(basic, adv))
+                       inner='box' if basic.get('box_visible') else 'quartile', ax=ax,
+                       palette=self._get_seaborn_kwargs(basic, adv).get('palette'))
 
     def _draw_strip(self, ax, df, basic, adv):
         orient = 'v' if basic.get('orientation') == 'Vertical' else 'h'
         x, y = (basic.get('x_col'), basic.get('y_col')) if orient == 'v' else (basic.get('y_col'), basic.get('x_col'))
         if x == 'None': x = None
         sns.stripplot(data=df, x=x, y=y, hue=basic.get('color_col') if basic.get('color_col') != 'None' else None,
-                      orient=orient, jitter=basic.get('add_jitter', True), ax=ax, **self._get_seaborn_kwargs(basic, adv))
+                      orient=orient, jitter=basic.get('add_jitter', True), ax=ax,
+                      palette=self._get_seaborn_kwargs(basic, adv).get('palette'))
 
     def _draw_density(self, ax, df, basic, adv):
         sns.kdeplot(data=df, x=basic.get('x_col'), y=basic.get('y_col'),
                     hue=basic.get('color_col') if basic.get('color_col') != 'None' else None,
-                    fill=basic.get('fill_contour', True), ax=ax, **self._get_seaborn_kwargs(basic, adv))
+                    fill=basic.get('fill_contour', True), ax=ax,
+                     palette=self._get_seaborn_kwargs(basic, adv).get('palette'))
 
     def _draw_distplot(self, ax, df, basic, adv):
         cols_to_plot = basic.get('hist_data_cols_list', [])
@@ -333,7 +341,7 @@ class PlotGenerationWorker(QThread):
         for i, col in enumerate(cols_to_plot):
             color = colors[i] if (colors is not None and i < len(colors)) else None
             
-            
+            palette = self._get_seaborn_kwargs(basic, adv).get('palette')
             if basic.get('show_hist', True) or basic.get('show_kde', True):
                 bin_size = basic.get('bin_size') if isinstance(basic.get('bin_size'), int) and basic.get('bin_size') > 0 else 'auto'
                 sns.histplot(data=df, x=col, ax=ax, label=col, 
@@ -342,7 +350,8 @@ class PlotGenerationWorker(QThread):
                              bins=bin_size or 'auto',
                              element="step" if len(cols_to_plot) > 1 else "bars",
                              fill=basic.get('show_hist', True),
-                             color=color
+                             color=color,
+                             palette=palette
                              )
             if basic.get('show_rug', False):
                 sns.rugplot(data=df, x=col, ax=ax, color=color, height=0.025)
@@ -401,13 +410,64 @@ class PlotGenerationWorker(QThread):
         
         if basic.get('add_trendline'):
             
-            valid_data = df_plot[[x_col, y_col]].dropna()
-            if not valid_data.empty:
-                sns.regplot(data=valid_data, x=x_col, y=y_col, ax=ax, scatter=False, color='purple', 
-                            line_kws={'linestyle':'--'}, label='Trendline')
-            else:
-                self.plot_status_update.emit("Cannot draw trendline, data contains NaNs.")
+            valid_data = df_plot[[x_col, y_col]].dropna().copy()
+            temp_x_col, temp_y_col = x_col, y_col
 
+            # # Convert datetime columns to numeric for regplot calculation
+            # x_is_datetime = pd.api.types.is_datetime64_any_dtype(valid_data[x_col])
+            # if x_is_datetime:
+            #     x_min_dt = valid_data[x_col].min()
+            #     temp_x_col = f'{x_col}_numeric_sec'
+            #     valid_data[temp_x_col] = (valid_data[x_col] - x_min_dt).dt.total_seconds()
+
+            # y_is_datetime = pd.api.types.is_datetime64_any_dtype(valid_data[y_col])
+            # if y_is_datetime:
+            #     y_min_dt = valid_data[y_col].min()
+            #     temp_y_col = f'{y_col}_numeric_sec'
+            #     valid_data[temp_y_col] = (valid_data[y_col] - y_min_dt).dt.total_seconds()
+
+            try:
+                if not valid_data.empty:
+                    
+                    sns.regplot(data=valid_data, x=temp_x_col, y=temp_y_col, ax=ax, scatter=False, color='purple', 
+                                line_kws={'linestyle':'--'}, label='Trendline')
+                    
+                    # if x_is_datetime:
+                    #     ax.xaxis.set_major_locator(mticker.AutoLocator())
+                    #     ax.xaxis.set_major_formatter(mticker.ScalarFormatter())
+
+                    #     locs = ax.get_xticks()
+                    #     x_min_num = valid_data[temp_x_col].min()
+                    #     x_max_num = valid_data[temp_x_col].max()
+                    #     locs = locs[(locs >= x_min_num) & (locs <= x_max_num)]
+                        
+                    #     new_labels = [(x_min_dt + pd.to_timedelta(loc, unit='s')).strftime('%Y-%m-%d\n%H:%M:%S') for loc in locs]
+                        
+                    #     ax.set_xticks(locs)
+                    #     ax.set_xticklabels(new_labels, rotation=45, ha='right')
+                    #     ax.set_xlabel(x_col) 
+                                       
+                    # # Revert Y-axis ticks if it was a datetime column (less common)
+                    # if y_is_datetime:
+                    #     ax.yaxis.set_major_locator(mticker.AutoLocator())
+                    #     ax.yaxis.set_major_formatter(mticker.ScalarFormatter())
+
+                    #     locs = ax.get_yticks()
+                    #     y_min_num = valid_data[temp_y_col].min()
+                    #     y_max_num = valid_data[temp_y_col].max()
+                    #     locs = locs[(locs >= y_min_num) & (locs <= y_max_num)]
+
+                    #     new_labels = [(y_min_dt + pd.to_timedelta(loc, unit='s')).strftime('%Y-%m-%d\n%H:%M:%S') for loc in locs]
+
+                    #     ax.set_yticks(locs)
+                    #     ax.set_yticklabels(new_labels)
+                    #     ax.set_ylabel(y_col) 
+
+                else:
+                    self.plot_status_update.emit("Cannot draw trendline, data contains NaNs.")
+            except Exception as e:
+                self.plot_status_update.emit(f"Cannot draw trendline: {e}.")
+            
         ax.plot(df_plot[x_col], df_plot[y_col], 'o-', color='royalblue', label='Actual', markersize=3)
         
         if basic.get('y2_col') != "None":
@@ -419,8 +479,7 @@ class PlotGenerationWorker(QThread):
             else:
                 self.plot_status_update.emit(f"Y2-axis column '{basic.get('y2_col')}' is not numeric. Skipping.")
 
-        
-        ax.legend(loc='upper left')
+        ax.legend(loc='upper right')
 
     def _apply_matplotlib_layout(self, fig, ax, advanced_args, basic_args, plot_type):
         if ax is None: return
@@ -504,12 +563,11 @@ class PlotGenerationWorker(QThread):
                     if ax.xaxis.get_major_formatter() is not None:
                         ax.xaxis.set_major_locator(locator)
                         ax.xaxis.set_major_formatter(formatter)
-                fig.autofmt_xdate() 
+                fig.autofmt_xdate()
             except ImportError:
                 self.plot_status_update.emit("Could not import matplotlib date formatters.")
             except Exception as e:
                 self.plot_status_update.emit(f"Error formatting date axis: {e}")
-
         
         try:
             fig.set_constrained_layout(True)
@@ -999,7 +1057,7 @@ class VisualWorkshopApp(QMainWindow):
     def _add_timeseries_config(self, layout):
         core_group = CollapsibleGroupBox("Core Data", checked=True)
         core_layout = core_group.get_content_layout()
-        self._populate_column_combobox(self._add_widget_pair("Time Axis (X):", QComboBox(), core_layout, self.basic_config_widgets, "x_col"), include_none=False, data_types=["temporal", "sortable"])
+        self._populate_column_combobox(self._add_widget_pair("Time Axis (X):", QComboBox(), core_layout, self.basic_config_widgets, "x_col"), include_none=False, data_types=["temporal"])
         self._populate_column_combobox(self._add_widget_pair("Actual Values:", QComboBox(), core_layout, self.basic_config_widgets, "y_col"), include_none=False, data_types=["numeric"])
         self._populate_column_combobox(self._add_widget_pair("Secondary Values (Y2):", QComboBox(), core_layout, self.basic_config_widgets, "y2_col"), data_types=["numeric"])
         self._populate_column_combobox(self._add_widget_pair("Budget (Bars):", QComboBox(), core_layout, self.basic_config_widgets, "budget_col"), data_types=["numeric"])
@@ -1022,7 +1080,8 @@ class VisualWorkshopApp(QMainWindow):
         ma_window_spin.setEnabled(False)
         ma_checkbox.toggled.connect(ma_window_spin.setEnabled)
         analytics_layout.addWidget(ma_widget)
-        self._add_widget_pair("Add Trendline:", QCheckBox(), analytics_layout, self.basic_config_widgets, "add_trendline")
+        trend_widget = self._add_widget_pair("Add Trendline:", QCheckBox(), analytics_layout, self.basic_config_widgets, "add_trendline")
+        trend_widget.setDisabled(True)
         layout.addWidget(analytics_group)
         
         cb = self._add_widget_pair("Sort Time Axis:", QCheckBox(), layout, self.basic_config_widgets, "sort_x")
@@ -1467,8 +1526,8 @@ if __name__ == '__main__':
                 'value1': np.random.randn(n_rows) * 100 - 20,
                 'value2': np.random.rand(n_rows) * 50 + 10,
                 'size_col': np.random.rand(n_rows) * 20 + 5,
-                'time_data': pd.to_datetime(pd.date_range(start='2023-01-01', periods=min(n_rows,10000), freq='D')).to_series().sample(n_rows, replace=(10000<n_rows)).to_list(),
-                'date_data': pd.to_datetime(pd.date_range(start='2022-01-01', periods=min(n_rows,10000), freq='D')).to_series().sample(n_rows, replace=(10000<n_rows)).to_list(),
+                'time_data': pd.to_datetime(pd.date_range(start='1970-01-01', end=datetime.datetime.now().strftime("%Y-%m-%d"), periods=min(n_rows,10000))).to_series().sample(n_rows, replace=(10000<n_rows)).to_list(),
+                'date_data': pd.to_datetime(pd.date_range(start='1970-01-01', end=datetime.datetime.now().strftime("%Y-%m-%d"), periods=min(n_rows,10000))).to_series().sample(n_rows, replace=(10000<n_rows)).to_list(),
                 'bool_data': np.random.choice(np.array([True, False, None], dtype=object), n_rows, p=[0.45,0.4,0.15]),
             }
             df = pl.DataFrame(data)
