@@ -294,17 +294,20 @@ class VisualWorkshopApp(QMainWindow):
         plot_display_layout.addWidget(self.canvas)
 
     def _update_plot_config_ui(self, plot_type_name):
+        # Clear existing advanced groups and widgets
         for group_attr in ['advanced_group', 'distplot_advanced_group', 'pie_advanced_group']:
             group = getattr(self, group_attr, None)
             if group:
-                if self.config_layout.indexOf(group) != -1: self.config_layout.removeWidget(group)
+                if self.config_layout.indexOf(group) != -1:
+                    self.config_layout.removeWidget(group)
                 group.deleteLater()
                 setattr(self, group_attr, None)
 
+        # Clear basic config widgets from layout
         current_widgets = []
         for i in range(self.config_layout.count()):
             item = self.config_layout.itemAt(i)
-            if item and item.widget() and isinstance(item.widget(), QGroupBox) and "Basic" in item.widget().windowTitle().title():
+            if item and item.widget() and isinstance(item.widget(), QGroupBox) and "Basic" in item.widget().title():
                 current_widgets.append(item.widget())
         for widget in current_widgets:
             self.config_layout.removeWidget(widget)
@@ -650,7 +653,7 @@ class VisualWorkshopApp(QMainWindow):
         if len(print_vw_filename) > 30: print_vw_filename = print_vw_filename[:30] + "..."
         self.data_info_label.setText(f"<b>Source:</b> {print_vw_filename}\nDimensions: {self.current_df.height} rows, {self.current_df.width} cols")
         self._update_ui_for_data()
-        self._update_plot_config_ui(self.plot_type_combo.currentText())
+        # self._update_plot_config_ui(self.plot_type_combo.currentText())
 
     def refresh_data_from_pickaxe(self):
         if self.source_app and hasattr(self.source_app, 'get_current_dataframe_for_vw') and \
@@ -947,7 +950,9 @@ class VisualWorkshopApp(QMainWindow):
             ax.text(0.5, 0.5, "No columns selected.", ha='center', va='center'); return
         for col in cols_to_plot:
             sns.kdeplot(data=df, x=col, ax=ax, label=col, fill=basic.get('show_hist', True), 
-                        cut=0, cumulative=False, rug=basic.get('show_rug', False))
+                        cut=0, cumulative=False, 
+                        # rug=basic.get('show_rug', False)
+                        )
         if len(cols_to_plot) > 1: ax.legend()
 
     def _draw_timeseries(self, ax, df, basic, adv):
