@@ -1,21 +1,23 @@
-# visual_workshop.py
+
 import sys
 import os
 import polars as pl
 import numpy as np
+import pandas as pd
 import datetime
 import traceback
 import re
 from ast import literal_eval
 
-# --- Matplotlib and Seaborn Imports ---
+
 import matplotlib
 import matplotlib.pyplot as plt
 import seaborn as sns
 from matplotlib.figure import Figure
-from matplotlib.patches import Circle # Correct import for Circle
+from matplotlib.patches import Circle
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qt import NavigationToolbar2QT as NavigationToolbar
+from matplotlib.dates import AutoDateFormatter, AutoDateLocator
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -24,27 +26,498 @@ from PySide6.QtWidgets import (
     QMessageBox, QDialog, QDialogButtonBox, QSizePolicy, QRadioButton, QButtonGroup,
     QTextEdit, QToolButton
 )
-from PySide6.QtCore import Qt, Slot, QSize, QUrl
+
+from PySide6.QtCore import Qt, Slot, QSize, QUrl, QThread, Signal
 from PySide6.QtGui import QAction, QIcon
 
-# --- Local Imports ---
 from scipy.stats import norm
-from main import resource_path # Assuming main.py and resource_path are available
-from operation_logger import logger # Assuming operation_logger.py is available
+    
+from main import resource_path 
+from operation_logger import logger 
 
 
 PICKAXE_LOADERS_AVAILABLE = False
 try:
-    # from pickaxe.common.file_loaders import FileLoaderRegistry # Example
+    
     PICKAXE_LOADERS_AVAILABLE = False
 except ImportError:
     PICKAXE_LOADERS_AVAILABLE = False
 
-# --- Apply a neat base design for all plots ---
+
 matplotlib.use('QtAgg')
 plt.style.use('seaborn-v0_8-whitegrid')
-# Use constrained_layout as the default for better automatic spacing
+
 plt.rcParams['figure.constrained_layout.use'] = True
+
+
+class PlotGenerationWorker(QThread):
+    """
+    Worker thread to generate matplotlib/seaborn plots off the main GUI thread.
+    """
+    
+    plot_finished = Signal(object) 
+    
+    plot_error = Signal(str)
+    
+    plot_status_update = Signal(str)
+
+    def __init__(self, plot_type, df_pd, basic_args, advanced_args, figsize, parent=None):
+        super().__init__(parent)
+        self.plot_type = plot_type
+        self.df_pd = df_pd
+        self.basic_args = basic_args
+        self.advanced_args = advanced_args
+        self.figsize = figsize
+
+    def run(self):
+        """
+        This runs in the separate thread.
+        It creates a new Figure, draws on it, and emits the result.
+        """
+        try:
+            
+            fig = Figure(figsize=self.figsize)
+
+            
+            facet_row = self.advanced_args.get('facet_row_combo', "None")
+            facet_col = self.advanced_args.get('facet_col_combo', "None")
+            use_facets = (facet_row != "None" or facet_col != "None") and \
+                         self.plot_type not in ["Pie Chart", "Distribution Plot (Distplot)"]
+
+            plot_axes = None
+            if use_facets:
+                row_cats = self.df_pd[facet_row].dropna().unique() if facet_row != "None" else [None]
+                col_cats = self.df_pd[facet_col].dropna().unique() if facet_col != "None" else [None]
+                axs = fig.subplots(len(row_cats), len(col_cats), sharex='col', sharey='row', squeeze=False) 
+                
+                for r_idx, r_cat in enumerate(row_cats):
+                    for c_idx, c_cat in enumerate(col_cats):
+                        ax = axs[r_idx, c_idx]
+                        facet_df = self.df_pd
+                        if r_cat is not None: facet_df = facet_df[facet_df[facet_row] == r_cat]
+                        if c_cat is not None: facet_df = facet_df[facet_df[facet_col] == c_cat]
+                        
+                        if facet_df.empty: 
+                            ax.set_axis_off()
+                            continue
+
+                        
+                        self._draw_plot_on_ax(ax, self.plot_type, facet_df, self.basic_args, self.advanced_args)
+                        
+                        
+                        if r_idx == 0 and c_cat is not None: 
+                            ax.set_title(str(c_cat))
+                        if c_idx == 0 and r_cat is not None: 
+                            
+                            ax.set_ylabel(str(r_cat), rotation=90, size='large') 
+                
+                plot_axes = axs
+            else:
+                
+                ax = fig.add_subplot(111)
+                self._draw_plot_on_ax(ax, self.plot_type, self.df_pd, self.basic_args, self.advanced_args)
+                plot_axes = ax
+
+            
+            self._apply_matplotlib_layout(fig, plot_axes, self.advanced_args, self.basic_args, self.plot_type)
+            
+            
+            self.plot_finished.emit(fig)
+
+        except Exception as e:
+            
+            error_str = f"Error during plot generation: {str(e)}\n{traceback.format_exc()}"
+            print(error_str) 
+            self.plot_error.emit(str(e)) 
+    
+    
+    
+    def _get_seaborn_kwargs(self, basic_args, advanced_args):
+        kwargs = {}
+        if basic_args.get('color_col') != "None": kwargs['hue'] = basic_args.get('color_col')
+        if basic_args.get('symbol_col') != "None": kwargs['style'] = basic_args.get('symbol_col')
+        if basic_args.get('size_col') != "None": kwargs['size'] = basic_args.get('size_col')
+        
+        cmap_name = advanced_args.get('colormap_edit')
+        if cmap_name:
+            try:
+                
+                plt.get_cmap(cmap_name)
+                kwargs['palette'] = cmap_name
+            except ValueError:
+                self.plot_status_update.emit(f"Invalid colormap: '{cmap_name}'. Using default.")
+        return kwargs
+
+    def _draw_plot_on_ax(self, ax, plot_type, df_pd, basic_args, advanced_args):
+        plot_drawers = {
+            "Scatter Plot": self._draw_scatter, "Line Plot": self._draw_line, "Bar Chart": self._draw_bar,
+            "Pie Chart": self._draw_pie, "Histogram": self._draw_histogram, "Box Plot": self._draw_box,
+            "Violin Plot": self._draw_violin, "Strip Plot": self._draw_strip, "Density Contour": self._draw_density,
+            "Distribution Plot (Distplot)": self._draw_distplot, "Time Series Plot": self._draw_timeseries,
+        }
+        if plot_type in plot_drawers:
+            plot_drawers[plot_type](ax, df_pd, basic_args, advanced_args)
+
+    def _draw_scatter(self, ax, df, basic, adv):
+        sns.scatterplot(data=df, x=basic.get('x_col'), y=basic.get('y_col'), ax=ax, **self._get_seaborn_kwargs(basic, adv))
+
+    def _draw_line(self, ax, df, basic, adv):
+        df_plot = df
+        if basic.get('sort_x', True):
+            try:
+                df_plot = df.sort_values(by=basic.get('x_col'))
+            except Exception as e:
+                self.plot_status_update.emit(f"Could not sort X-axis: {e}")
+                
+        sns.lineplot(data=df_plot, x=basic.get('x_col'), y=basic.get('y_col'), ax=ax, marker='o', **self._get_seaborn_kwargs(basic, adv))
+
+    def _draw_bar(self, ax, df, basic, adv):
+        orient = 'v' if basic.get('orientation') == 'Vertical' else 'h'
+        x, y = (basic.get('x_col'), basic.get('y_col')) if orient == 'v' else (basic.get('y_col'), basic.get('x_col'))
+        
+        agg_map = {'mean': np.mean, 'sum': np.sum, 'median': np.median, 'min': np.min, 'max': np.max, 'first': 'first', 'last': 'last'}
+        estimator_val = agg_map.get(basic.get('agg_func'), 'mean')
+        
+        if basic.get('y_col') == 'None' or basic.get('agg_func') == 'count':
+            estimator = 'count'
+        else:
+            estimator = estimator_val
+
+        hue_col = basic.get('color_col') if basic.get('color_col') != 'None' else None
+        
+        
+        palette = self._get_seaborn_kwargs(basic, adv).get('palette')
+
+        
+        
+        dodge = True
+        if hue_col and basic.get('barmode') == 'Stack':
+            
+            
+            dodge = False 
+            self.plot_status_update.emit("Stack mode not supported by sns.barplot. Overlaying instead.")
+
+        sns.barplot(data=df, x=x, y=y, ax=ax, orient=orient, hue=hue_col,
+                    palette=palette, estimator=estimator, dodge=dodge)
+
+    def _draw_pie(self, ax, df, basic, adv):
+        names_col, mode = basic.get('names_col'), basic.get('pie_mode')
+        
+        
+        data = None
+        if mode == "Count Occurrences (Rows)":
+            if names_col in df.columns:
+                data = df[names_col].value_counts()
+            else:
+                self.plot_error.emit(f"Column '{names_col}' not found.")
+                return
+        else:
+            values_col = basic.get('values_col')
+            if names_col in df.columns and values_col in df.columns:
+                
+                if pd.api.types.is_numeric_dtype(df[values_col]):
+                    data = df.groupby(names_col)[values_col].sum()
+                else:
+                    self.plot_error.emit(f"Values column '{values_col}' is not numeric.")
+                    return
+            else:
+                self.plot_error.emit(f"Column '{names_col}' or '{values_col}' not found.")
+                return
+
+        
+        if data is not None:
+            data = data[data > 0]
+        
+        if data is None or data.empty:
+            ax.text(0.5, 0.5, "No positive data to display.", ha='center', va='center', color='gray')
+            return
+
+        labels, values = data.index, data.values
+        
+        
+        explode = None
+        if adv.get('explode_edit'):
+            try: 
+                explode_vals = [float(x.strip()) for x in adv.get('explode_edit').split(',')]
+                if len(explode_vals) == len(values):
+                    explode = explode_vals
+                elif len(explode_vals) > 0:
+                    explode = explode_vals + [0.0] * (len(values) - len(explode_vals)) 
+                    explode = explode[:len(values)] 
+                else:
+                    explode = None
+            except: 
+                self.plot_status_update.emit("Invalid explode format. Use CSV (e.g., 0,0.1,0).")
+
+        
+        cmap_name = adv.get('colormap_edit')
+        colors = None
+        if cmap_name:
+            try:
+                cmap = plt.get_cmap(cmap_name)
+                colors = cmap(np.linspace(0, 1, len(values)))
+            except ValueError:
+                self.plot_status_update.emit(f"Invalid colormap: '{cmap_name}'. Using default.")
+
+        wedges, texts, autotexts = ax.pie(values, labels=labels, autopct='%1.1f%%', 
+                                          explode=explode, shadow=True, startangle=90,
+                                          colors=colors)
+        
+        if basic.get('is_donut'):
+            ax.add_artist(Circle((0,0),0.70,fc='white'))
+        
+        ax.axis('equal')
+        
+
+    def _draw_histogram(self, ax, df, basic, adv):
+        sns.histplot(data=df, x=basic.get('x_col'), weights=basic.get('y_col') if basic.get('y_col') != 'None' else None,
+                     hue=basic.get('color_col') if basic.get('color_col') != 'None' else None,
+                     bins=basic.get('nbinsx') or 'auto', kde=basic.get('add_kde', False),
+                     cumulative=basic.get('cumulative_enabled', False), stat=basic.get('histnorm', 'count').lower(),
+                     ax=ax, **self._get_seaborn_kwargs(basic, adv))
+
+    def _draw_box(self, ax, df, basic, adv):
+        orient = 'v' if basic.get('orientation') == 'Vertical' else 'h'
+        x, y = (basic.get('x_col'), basic.get('y_col')) if orient == 'v' else (basic.get('y_col'), basic.get('x_col'))
+        if x == 'None': x = None
+        sns.boxplot(data=df, x=x, y=y, hue=basic.get('color_col') if basic.get('color_col') != 'None' else None,
+                    orient=orient, notch=basic.get('notched', False), ax=ax, **self._get_seaborn_kwargs(basic, adv))
+
+    def _draw_violin(self, ax, df, basic, adv):
+        orient = 'v' if basic.get('orientation') == 'Vertical' else 'h'
+        x, y = (basic.get('x_col'), basic.get('y_col')) if orient == 'v' else (basic.get('y_col'), basic.get('x_col'))
+        if x == 'None': x = None
+        
+        split = False
+        hue = basic.get('color_col') if basic.get('color_col') != 'None' else None
+        
+        if basic.get('split_by_col') != 'None':
+            hue = basic.get('split_by_col')
+            if hue and hue in df.columns and df[hue].nunique() == 2: 
+                split = True
+            else:
+                split = False
+                if hue:
+                    self.plot_status_update.emit("Split-by column must have exactly 2 unique values. Not splitting.")
+        
+        sns.violinplot(data=df, x=x, y=y, hue=hue, split=split, orient=orient, 
+                       inner='box' if basic.get('box_visible') else 'quartile', ax=ax, **self._get_seaborn_kwargs(basic, adv))
+
+    def _draw_strip(self, ax, df, basic, adv):
+        orient = 'v' if basic.get('orientation') == 'Vertical' else 'h'
+        x, y = (basic.get('x_col'), basic.get('y_col')) if orient == 'v' else (basic.get('y_col'), basic.get('x_col'))
+        if x == 'None': x = None
+        sns.stripplot(data=df, x=x, y=y, hue=basic.get('color_col') if basic.get('color_col') != 'None' else None,
+                      orient=orient, jitter=basic.get('add_jitter', True), ax=ax, **self._get_seaborn_kwargs(basic, adv))
+
+    def _draw_density(self, ax, df, basic, adv):
+        sns.kdeplot(data=df, x=basic.get('x_col'), y=basic.get('y_col'),
+                    hue=basic.get('color_col') if basic.get('color_col') != 'None' else None,
+                    fill=basic.get('fill_contour', True), ax=ax, **self._get_seaborn_kwargs(basic, adv))
+
+    def _draw_distplot(self, ax, df, basic, adv):
+        cols_to_plot = basic.get('hist_data_cols_list', [])
+        if not cols_to_plot:
+            ax.text(0.5, 0.5, "No columns selected.", ha='center', va='center', color='gray')
+            return
+
+        cmap_name = adv.get('colormap_edit')
+        colors = None
+        if cmap_name:
+            try:
+                cmap = plt.get_cmap(cmap_name)
+                colors = cmap(np.linspace(0, 1, len(cols_to_plot)))
+            except ValueError:
+                self.plot_status_update.emit(f"Invalid colormap: '{cmap_name}'. Using default.")
+        
+        for i, col in enumerate(cols_to_plot):
+            color = colors[i] if (colors is not None and i < len(colors)) else None
+            
+            
+            if basic.get('show_hist', True) or basic.get('show_kde', True):
+                bin_size = basic.get('bin_size') if isinstance(basic.get('bin_size'), int) and basic.get('bin_size') > 0 else 'auto'
+                sns.histplot(data=df, x=col, ax=ax, label=col, 
+                             kde=basic.get('show_kde', True),
+                             stat="density", 
+                             bins=bin_size or 'auto',
+                             element="step" if len(cols_to_plot) > 1 else "bars",
+                             fill=basic.get('show_hist', True),
+                             color=color
+                             )
+            if basic.get('show_rug', False):
+                sns.rugplot(data=df, x=col, ax=ax, color=color, height=0.025)
+
+        if len(cols_to_plot) > 1: ax.legend()
+
+    def _draw_timeseries(self, ax, df, basic, adv):
+        x_col, y_col = basic.get('x_col'), basic.get('y_col')
+        
+        df_plot = df
+        if basic.get('sort_x', True):
+            try:
+                df_plot = df.sort_values(by=x_col)
+            except Exception as e:
+                self.plot_status_update.emit(f"Could not sort time axis: {e}")
+        
+        
+        if not pd.api.types.is_datetime64_any_dtype(df_plot[x_col]):
+             try:
+                 df_plot[x_col] = pd.to_datetime(df_plot[x_col])
+                 df_plot = df_plot.sort_values(by=x_col)
+             except Exception as e:
+                 self.plot_status_update.emit(f"Could not convert X-axis '{x_col}' to datetime: {e}")
+
+        
+        if not pd.api.types.is_numeric_dtype(df_plot[y_col]):
+            try:
+                df_plot[y_col] = pd.to_numeric(df_plot[y_col])
+            except Exception as e:
+                 self.plot_error.emit(f"Could not convert Y-axis '{y_col}' to numeric: {e}")
+                 return
+
+        if basic.get('budget_col') != "None": 
+            if pd.api.types.is_numeric_dtype(df_plot[basic.get('budget_col')]):
+                
+                try:
+                    time_diffs = pd.to_datetime(df_plot[x_col]).diff().median()
+                    bar_width = time_diffs * 0.8 if pd.notna(time_diffs) else 1
+                except:
+                    bar_width = 1 
+                ax.bar(df_plot[x_col], df_plot[basic.get('budget_col')], label='Budgeted', color='sandybrown', alpha=0.6, width=bar_width)
+            else:
+                 self.plot_status_update.emit(f"Budget column '{basic.get('budget_col')}' is not numeric. Skipping.")
+        
+        if basic.get('forecast_lower_col') != "None" and basic.get('forecast_upper_col') != "None":
+            ax.fill_between(df_plot[x_col], df_plot[basic.get('forecast_lower_col')], df_plot[basic.get('forecast_upper_col')], color='gray', alpha=0.3, label='Forecast CI')
+        
+        if basic.get('forecast_col') != "None": 
+            ax.plot(df_plot[x_col], df_plot[basic.get('forecast_col')], 'k--', label='Forecast')
+        
+        if basic.get('add_ma'):
+            window = basic.get('ma_window', 7)
+            if window > 0 and window < len(df_plot):
+                ma_series = df_plot[y_col].rolling(window=window).mean()
+                ax.plot(df_plot[x_col], ma_series, color='lightseagreen', label=f'{window}-period MA')
+        
+        if basic.get('add_trendline'):
+            
+            valid_data = df_plot[[x_col, y_col]].dropna()
+            if not valid_data.empty:
+                sns.regplot(data=valid_data, x=x_col, y=y_col, ax=ax, scatter=False, color='purple', 
+                            line_kws={'linestyle':'--'}, label='Trendline')
+            else:
+                self.plot_status_update.emit("Cannot draw trendline, data contains NaNs.")
+
+        ax.plot(df_plot[x_col], df_plot[y_col], 'o-', color='royalblue', label='Actual', markersize=3)
+        
+        if basic.get('y2_col') != "None":
+            if pd.api.types.is_numeric_dtype(df_plot[basic.get('y2_col')]):
+                ax2 = ax.twinx()
+                ax2.plot(df_plot[x_col], df_plot[basic.get('y2_col')], '.-', color='firebrick', label=basic.get('y2_col'))
+                ax2.set_ylabel(basic.get('y2_col'))
+                ax2.legend(loc='upper right')
+            else:
+                self.plot_status_update.emit(f"Y2-axis column '{basic.get('y2_col')}' is not numeric. Skipping.")
+
+        
+        ax.legend(loc='upper left')
+
+    def _apply_matplotlib_layout(self, fig, ax, advanced_args, basic_args, plot_type):
+        if ax is None: return
+        axs = ax.flatten() if isinstance(ax, np.ndarray) else [ax]
+        
+        title = advanced_args.get('plot_title_edit')
+        if not title: 
+            title = f"{plot_type}"
+            if plot_type in ["Scatter Plot", "Line Plot", "Density Contour", "Time Series Plot"]:
+                title = f"{basic_args.get('y_col', 'Y')} vs. {basic_args.get('x_col', 'X')}"
+            elif plot_type in ["Bar Chart", "Box Plot", "Violin Plot", "Strip Plot"]:
+                y_col, x_col = basic_args.get('y_col', 'None'), basic_args.get('x_col', 'None')
+                if y_col != 'None' and x_col != 'None': title = f"{y_col} by {x_col}"
+                elif y_col != 'None': title = f"Distribution of {y_col}"
+                elif x_col != 'None': title = f"Count of {x_col}"
+            elif plot_type == "Histogram": title = f"Histogram of {basic_args.get('x_col', 'X')}"
+            elif plot_type == "Distribution Plot (Distplot)":
+                cols = basic_args.get('hist_data_cols_list', [])
+                title = f"Distribution of {', '.join(cols)}" if cols else "Distribution Plot"
+            elif plot_type == "Pie Chart": title = f"Distribution of {basic_args.get('names_col', 'Categories')}"
+        
+        fig.suptitle(title, fontsize=16)
+        
+        
+        
+        main_ax = axs[0]
+        
+        if plot_type != "Pie Chart":
+            x_label = advanced_args.get('xaxis_label_edit') or (basic_args.get('x_col') if basic_args.get('x_col') != 'None' else "")
+            y_label = advanced_args.get('yaxis_label_edit') or (basic_args.get('y_col') if basic_args.get('y_col') != 'None' else "")
+
+            
+            if isinstance(ax, np.ndarray): 
+                 fig.supxlabel(x_label)
+                 fig.supylabel(y_label)
+            else: 
+                main_ax.set_xlabel(x_label)
+                main_ax.set_ylabel(y_label)
+
+        
+        legend_title = advanced_args.get('legend_title_edit')
+        if not legend_title: 
+            if basic_args.get('color_col', 'None') != 'None': legend_title = basic_args.get('color_col')
+            elif basic_args.get('symbol_col', 'None') != 'None': legend_title = basic_args.get('symbol_col')
+            elif basic_args.get('size_col', 'None') != 'None': legend_title = basic_args.get('size_col')
+
+        
+        for current_ax in axs:
+            legend = current_ax.get_legend()
+            if legend:
+                if legend_title:
+                    legend.set_title(legend_title)
+            elif legend_title: 
+                try:
+                    handles, labels = current_ax.get_legend_handles_labels()
+                    if handles: current_ax.legend(handles=handles, labels=labels, title=legend_title)
+                except (AttributeError, IndexError): pass
+
+        
+        for current_ax in axs:
+            if advanced_args.get('log_x_check'): current_ax.set_xscale('log')
+            if advanced_args.get('log_y_check'): current_ax.set_yscale('log')
+            try:
+                if advanced_args.get('xaxis_range_edit'):
+                    min_val, max_val = map(float, advanced_args.get('xaxis_range_edit').split(','))
+                    current_ax.set_xlim(min_val, max_val)
+                if advanced_args.get('yaxis_range_edit'):
+                    min_val, max_val = map(float, advanced_args.get('yaxis_range_edit').split(','))
+                    current_ax.set_ylim(min_val, max_val)
+            except (ValueError, IndexError):
+                self.plot_status_update.emit("Invalid axis range format. Use 'min,max'.")
+
+        
+        x_col_name = basic_args.get('x_col')
+        if x_col_name and x_col_name in self.df_pd.columns and pd.api.types.is_datetime64_any_dtype(self.df_pd[x_col_name]):
+            try:
+                locator = AutoDateLocator()
+                formatter = AutoDateFormatter(locator)
+                for ax in axs:
+                    
+                    if ax.xaxis.get_major_formatter() is not None:
+                        ax.xaxis.set_major_locator(locator)
+                        ax.xaxis.set_major_formatter(formatter)
+                fig.autofmt_xdate() 
+            except ImportError:
+                self.plot_status_update.emit("Could not import matplotlib date formatters.")
+            except Exception as e:
+                self.plot_status_update.emit(f"Error formatting date axis: {e}")
+
+        
+        try:
+            fig.set_constrained_layout(True)
+        except Exception:
+            try:
+                fig.tight_layout() 
+            except Exception as e:
+                 self.plot_status_update.emit(f"Layout adjustment failed: {e}")
 
 
 class CollapsibleGroupBox(QGroupBox):
@@ -63,37 +536,19 @@ class CollapsibleGroupBox(QGroupBox):
         
         self.toggled.connect(self._toggle_content_internal)
         self.setChecked(checked)
+        self._toggle_content_internal(checked) 
 
     def _toggle_content_internal(self, checked):
         self.content_widget.setVisible(checked)
+        
         if checked:
-            self.content_widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
-            self.content_widget.setMaximumHeight(16777215)
+            self.content_widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+            self.setMaximumHeight(16777215) 
         else:
             self.content_widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-            self.content_widget.setMaximumHeight(0)
-        
-        self.content_widget.adjustSize() 
-        self.adjustSize()
-
-        parent = self.parentWidget()
-        while parent:
-            layout = parent.layout()
-            if layout: # FIX: Check if layout exists before activating
-                layout.activate()
-            if isinstance(parent, QScrollArea):
-                 if parent.widget():
-                     parent.widget().adjustSize()
-                 parent.updateGeometry()
-            parent = parent.parentWidget()
-        
-        QApplication.processEvents()
-
+            self.setMaximumHeight(self.fontMetrics().height() + 20)
     def add_widget_to_content(self, widget):
         self.content_layout.addWidget(widget)
-        if self.isChecked():
-            self.content_widget.adjustSize()
-            self.adjustSize()
 
     def get_content_layout(self):
         return self.content_layout
@@ -114,7 +569,8 @@ class VisualWorkshopApp(QMainWindow):
         self.advanced_group = None
         self.distplot_advanced_group = None
         self.pie_advanced_group = None
-        
+        self.plot_worker = None
+
         if not self.current_log_file_path:
             default_log_name = f".__log__vw_session_default_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
             self.current_log_file_path = os.path.join(os.getcwd(), default_log_name)
@@ -123,11 +579,11 @@ class VisualWorkshopApp(QMainWindow):
         self.setWindowTitle("Visual Workshop - Polars Plotting Studio (Matplotlib Edition)")
         self.setGeometry(150, 150, 1400, 900)
 
-        pickaxe_icon_path = resource_path("pickaxe.ico")
-        if os.path.exists(pickaxe_icon_path):
-            self.setWindowIcon(QIcon(pickaxe_icon_path))
+        vw_icon_path = resource_path("vw.ico")
+        if os.path.exists(vw_icon_path):
+            self.setWindowIcon(QIcon(vw_icon_path))
 
-        # --- Matplotlib Figure ---
+        
         self.fig = Figure(figsize=(10, 8))
         self.current_plot_ax = None
 
@@ -156,6 +612,7 @@ class VisualWorkshopApp(QMainWindow):
         self.statusBar().show()
 
     def _create_actions(self):
+        
         doc_open_icon = QIcon(resource_path("document-open.png")) if os.path.exists(resource_path("document-open.png")) else QIcon.fromTheme("document-open")
         app_exit_icon = QIcon(resource_path("application-exit.png")) if os.path.exists(resource_path("application-exit.png")) else QIcon.fromTheme("application-exit")
         view_refresh_icon = QIcon(resource_path("view-refresh.png")) if os.path.exists(resource_path("view-refresh.png")) else QIcon.fromTheme("view-refresh")
@@ -171,6 +628,7 @@ class VisualWorkshopApp(QMainWindow):
         self.refresh_data_action.setEnabled(self.source_app is not None)
 
     def _create_menubar(self):
+        
         menubar = self.menuBar()
         file_menu = menubar.addMenu("&File")
         file_menu.addAction(self.open_file_action)
@@ -181,6 +639,7 @@ class VisualWorkshopApp(QMainWindow):
         data_menu.addAction(self.refresh_data_action)
 
     def _create_controls_pane(self):
+        
         self.controls_widget = QWidget()
         controls_layout = QVBoxLayout(self.controls_widget)
         controls_layout.setContentsMargins(10,10,10,10)
@@ -242,6 +701,11 @@ class VisualWorkshopApp(QMainWindow):
         self.sample_representative_rb.toggled.connect(self.representative_sample_inputs_widget.setVisible)
         self.representative_sample_inputs_widget.setVisible(self.sample_representative_rb.isChecked())
         controls_layout.addWidget(sampling_group)
+        
+        # self.sample_representative_rb.setDisabled(True)
+        # self.sample_representative_rb.setText("Representative sample (disabled, missing 'scipy')")
+        # self.sample_representative_rb.setToolTip("Please install 'scipy' to enable this feature.")
+
 
         plot_type_group = QGroupBox("Plot Type")
         plot_type_layout = QVBoxLayout(plot_type_group)
@@ -274,13 +738,13 @@ class VisualWorkshopApp(QMainWindow):
         self.save_plot_button.setFixedHeight(30)
         controls_layout.addWidget(self.save_plot_button)
 
-        # self._update_plot_config_ui(self.plot_type_combo.currentText())
-
     def _create_plot_display_pane(self):
         self.plot_display_widget = QWidget()
-        plot_display_layout = QVBoxLayout(self.plot_display_widget)
+        
+        self.plot_display_layout = QVBoxLayout(self.plot_display_widget)
 
         self.canvas = FigureCanvas(self.fig)
+        
         
         ax = self.fig.add_subplot(111)
         ax.text(0.5, 0.5, "Load data and configure a plot to display.", 
@@ -290,8 +754,8 @@ class VisualWorkshopApp(QMainWindow):
         
         self.toolbar = NavigationToolbar(self.canvas, self)
 
-        plot_display_layout.addWidget(self.toolbar)
-        plot_display_layout.addWidget(self.canvas)
+        self.plot_display_layout.addWidget(self.toolbar)
+        self.plot_display_layout.addWidget(self.canvas)
 
     def _update_plot_config_ui(self, plot_type_name):
         # Clear existing advanced groups and widgets
@@ -307,7 +771,7 @@ class VisualWorkshopApp(QMainWindow):
         current_widgets = []
         for i in range(self.config_layout.count()):
             item = self.config_layout.itemAt(i)
-            if item and item.widget() and isinstance(item.widget(), QGroupBox) and "Basic" in item.widget().title():
+            if item and item.widget() and isinstance(item.widget(), QGroupBox) and "Basic" in item.widget().title(): # type: ignore
                 current_widgets.append(item.widget())
         for widget in current_widgets:
             self.config_layout.removeWidget(widget)
@@ -318,26 +782,27 @@ class VisualWorkshopApp(QMainWindow):
         self.distplot_advanced_widgets.clear()
         self.pie_advanced_widgets.clear()
 
+
         basic_group = QGroupBox(f"Basic {plot_type_name} Configuration")
         basic_layout = QVBoxLayout(basic_group)
         self._add_basic_config_widgets(plot_type_name, basic_layout)
-        self.config_layout.addWidget(basic_group)
+        self.config_layout.addWidget(basic_group, alignment= Qt.AlignmentFlag.AlignTop)
 
         if plot_type_name == "Distribution Plot (Distplot)":
             self.distplot_advanced_group = CollapsibleGroupBox("Advanced Distplot Configuration")
             self._add_distplot_advanced_config(self.distplot_advanced_group.get_content_layout())
-            self.config_layout.addWidget(self.distplot_advanced_group)
+            self.config_layout.addWidget(self.distplot_advanced_group, alignment= Qt.AlignmentFlag.AlignTop)
         elif plot_type_name == "Pie Chart":
             self.pie_advanced_group = CollapsibleGroupBox("Advanced Pie Chart Configuration")
             self._add_pie_advanced_config(self.pie_advanced_group.get_content_layout())
-            self.config_layout.addWidget(self.pie_advanced_group)
+            self.config_layout.addWidget(self.pie_advanced_group, alignment= Qt.AlignmentFlag.AlignTop)
         else:
             self.advanced_group = CollapsibleGroupBox("Advanced Plot Configuration")
             self._add_advanced_config_widgets(self.advanced_group.get_content_layout(), plot_type_name)
-            self.config_layout.addWidget(self.advanced_group)
+            self.config_layout.addWidget(self.advanced_group, alignment= Qt.AlignmentFlag.AlignTop)
 
-        self.config_layout.addStretch()
-
+    
+    
     def _add_basic_config_widgets(self, plot_type, layout):
         widget_adders = {
             "Scatter Plot": self._add_scatter_config, "Line Plot": self._add_line_config,
@@ -444,7 +909,7 @@ class VisualWorkshopApp(QMainWindow):
         self.bar_mode_label = QLabel("Bar Mode:")
         self.bar_mode_label.setFixedWidth(120)
         self.bar_mode_combo = QComboBox()
-        self.bar_mode_combo.addItems(["Dodge", "Stack"])
+        self.bar_mode_combo.addItems(["Dodge", "Stack"]) 
         self.basic_config_widgets["barmode"] = self.bar_mode_combo
         self.bar_mode_row_layout = QHBoxLayout()
         self.bar_mode_row_layout.addWidget(self.bar_mode_label)
@@ -454,7 +919,7 @@ class VisualWorkshopApp(QMainWindow):
         self._on_bar_color_by_changed(self.basic_config_widgets["color_col"].currentText())
 
         agg_combo = self._add_widget_pair("Aggregation:", QComboBox(), layout, self.basic_config_widgets, "agg_func")
-        agg_combo.addItems(["sum", "mean", "median", "min", "max", "count", "first", "last"])
+        agg_combo.addItems(["mean", "sum", "median", "min", "max", "count", "first", "last"])
         orient_combo = self._add_widget_pair("Orientation:", QComboBox(), layout, self.basic_config_widgets, "orientation")
         orient_combo.addItems(["Vertical", "Horizontal"])
 
@@ -629,7 +1094,9 @@ class VisualWorkshopApp(QMainWindow):
         self._add_widget_pair("Legend Title:", QLineEdit(), layout, self.distplot_advanced_widgets, "legend_title_edit")
         cmap_help = "Enter any valid Matplotlib colormap name (e.g., 'viridis', 'coolwarm', 'rocket')."
         self._add_widget_pair("Colormap:", QLineEdit(), layout, self.distplot_advanced_widgets, "colormap_edit", help_text=cmap_help).setPlaceholderText("e.g., viridis")
-
+    
+    
+    
     def receive_dataframe(self, polars_df, filename_hint, log_file_path_from_source=None):
         if not isinstance(polars_df, pl.DataFrame):
             QMessageBox.warning(self, "Data Error", "Invalid data type received. Expected Polars DataFrame.")
@@ -653,7 +1120,7 @@ class VisualWorkshopApp(QMainWindow):
         if len(print_vw_filename) > 30: print_vw_filename = print_vw_filename[:30] + "..."
         self.data_info_label.setText(f"<b>Source:</b> {print_vw_filename}\nDimensions: {self.current_df.height} rows, {self.current_df.width} cols")
         self._update_ui_for_data()
-        # self._update_plot_config_ui(self.plot_type_combo.currentText())
+        
 
     def refresh_data_from_pickaxe(self):
         if self.source_app and hasattr(self.source_app, 'get_current_dataframe_for_vw') and \
@@ -661,7 +1128,8 @@ class VisualWorkshopApp(QMainWindow):
             df = self.source_app.get_current_dataframe_for_vw()
             hint = self.source_app.get_current_filename_hint_for_vw()
             log_path = None
-            if hasattr(self.source_app, 'get_current_log_file_path'): log_path = self.source_app.get_current_log_file_path()
+            if hasattr(self.source_app, 'current_log_file_path'): 
+                 log_path = self.source_app.current_log_file_path
             if df is not None:
                 self.receive_dataframe(df, hint, log_file_path_from_source=log_path)
                 self.statusBar().showMessage("Data refreshed from Pickaxe.", 3000)
@@ -673,7 +1141,6 @@ class VisualWorkshopApp(QMainWindow):
 
     def open_file_directly(self):
         df_loaded, file_name_loaded = None, None
-        # FIX: Changed third argument from None to "" for type safety
         file_name, _ = QFileDialog.getOpenFileName(self, "Open File", "", "CSV Files (*.csv);;Excel Files (*.xlsx *.xls);;Parquet Files (*.parquet)")
         if file_name:
             file_name_loaded = file_name
@@ -707,146 +1174,65 @@ class VisualWorkshopApp(QMainWindow):
             self._update_plot_config_ui(plot_type)
 
     def _calculate_representative_sample_size(self, df, target_column_name, margin_error_percent=5, confidence_level_percent=95):
+            
         if target_column_name not in df.columns: self.statusBar().showMessage(f"Target column '{target_column_name}' for sampling not found. Using max 10k rows.", 3000); return min(10000, df.height)
         series = df.get_column(target_column_name).drop_nulls()
         if series.is_empty(): self.statusBar().showMessage(f"Target column '{target_column_name}' is empty. Using max 10k rows for sampling.", 3000); return min(10000, df.height)
+        
         n_total = df.height
         if n_total == 0: return 0
-        confidence_level = confidence_level_percent / 100.0; Z = 1.96
-        try: Z = norm.ppf(1 - (1 - confidence_level) / 2)
-        except ImportError: self.statusBar().showMessage("Scipy not found, Z-score may not match selected confidence. Using 1.96 for 95% Confidence.", 2000);
-        except Exception: self.statusBar().showMessage("Scipy.stats.norm not available, Z-score may not match. Using 1.96 for 95% Confidence.", 2000)
-        sigma_or_p_estimate = 0.5; dtype = series.dtype; margin_error_prop = margin_error_percent / 100.0; E = margin_error_prop
+        
+        confidence_level = confidence_level_percent / 100.0
+        try: 
+            Z = norm.ppf(1 - (1 - confidence_level) / 2)
+        except Exception: 
+            self.statusBar().showMessage("Scipy.stats.norm not available, Z-score may not match. Using 1.96 for 95% Confidence.", 2000)
+            Z = 1.96
+            
+        sigma_or_p_estimate = 0.5
+        dtype = series.dtype
+        margin_error_prop = margin_error_percent / 100.0
+        E = margin_error_prop
+
         if dtype.is_numeric():
             std_dev = series.std()
             if std_dev is not None and std_dev > 0:
-                sigma_or_p_estimate = std_dev; mean_val = series.mean()
-                if mean_val is not None and abs(mean_val) > 1e-9: E = margin_error_prop * abs(mean_val)
+                sigma_or_p_estimate = std_dev
+                mean_val = series.mean()
+                if mean_val is not None and abs(mean_val) > 1e-9: 
+                    E = margin_error_prop * abs(mean_val)
                 else:
                     data_range = series.max() - series.min()
-                    if data_range is not None and data_range > 1e-9: E = margin_error_prop * data_range
-                    else: self.statusBar().showMessage(f"Cannot determine sensible margin of error for numeric '{target_column_name}'. Using high variability.", 3000); E = sigma_or_p_estimate * 0.1
-                if E == 0: E = 1e-6
-            else: self.statusBar().showMessage(f"No variability in numeric column '{target_column_name}'. Cannot calculate representative sample meaningfully.", 3000); return n_total
-        if E == 0: E = 1e-6
+                    if data_range is not None and data_range > 1e-9: 
+                        E = margin_error_prop * data_range
+                    else: 
+                        self.statusBar().showMessage(f"Cannot determine sensible margin of error for numeric '{target_column_name}'. Using high variability.", 3000)
+                        E = sigma_or_p_estimate * 0.1
+                if E == 0: E = 1e-6 
+            else: 
+                self.statusBar().showMessage(f"No variability in numeric column '{target_column_name}'. Cannot calculate representative sample meaningfully.", 3000)
+                return n_total
+        
+        if E == 0: E = 1e-6 
+        
         try:
-            if dtype.is_numeric(): n0 = ((Z * sigma_or_p_estimate) / E)**2
-            else: n0 = (Z**2 * 0.5 * 0.5) / (E**2)
+            if dtype.is_numeric(): 
+                n0 = ((Z * sigma_or_p_estimate) / E)**2
+            else: 
+                n0 = (Z**2 * 0.5 * 0.5) / (E**2)
+            
             calculated_n = n0 / (1 + (n0 - 1) / n_total) if n_total > n0 else n0
             sample_s = max(1, min(int(np.ceil(calculated_n)), n_total))
+            
             self.statusBar().showMessage(f"Calculated representative sample size: {sample_s} for '{target_column_name}' (CI: {confidence_level_percent}%, MoE: {margin_error_percent}%)", 5000)
             return sample_s
-        except (OverflowError, ZeroDivisionError, ValueError) as e_calc: self.statusBar().showMessage(f"Error calculating sample size for '{target_column_name}': {e_calc}. Using random 10k.", 3000); return min(10000, n_total)
-
-    @Slot()
-    def generate_plot(self):
-        if self.current_df is None or self.current_df.is_empty():
-            QMessageBox.information(self, "No Data", "Please load data before generating a plot.")
-            return
-
-        self.statusBar().showMessage("Generating plot...", 2000)
-        QApplication.processEvents()
-
-        plot_type = self.plot_type_combo.currentText()
-        df_to_plot = self.current_df
-        if self.sample_random_rb.isChecked():
-            if self.current_df.height > 10000:
-                self.statusBar().showMessage(f"Randomly sampling data from {self.current_df.height} to 10,000 rows...", 3000)
-                df_to_plot = self.current_df.sample(n=10000, shuffle=True, seed=42)
-        elif self.sample_representative_rb.isChecked():
-            margin_error_val = self.margin_error_input_rep.value()
-            confidence_level_val = int(self.ci_combo.currentText())
-            basic_args_temp = {k: self._get_widget_value(w) for k, w in self.basic_config_widgets.items()}
-            target_col_for_sampling = None
-            if plot_type in ["Scatter Plot", "Line Plot", "Bar Chart", "Box Plot", "Violin Plot", "Strip Plot", "Time Series Plot"]: target_col_for_sampling = basic_args_temp.get('y_col')
-            elif plot_type == "Histogram": target_col_for_sampling = basic_args_temp.get('x_col')
-            elif plot_type == "Pie Chart": target_col_for_sampling = basic_args_temp.get('values_col') if basic_args_temp.get('pie_mode') == "Sum Values from Column" else basic_args_temp.get('names_col')
-            elif plot_type == "Density Contour": target_col_for_sampling = basic_args_temp.get('y_col')
-            elif plot_type == "Distribution Plot (Distplot)":
-                selected_dist_cols = basic_args_temp.get('hist_data_cols_list', [])
-                if selected_dist_cols and isinstance(selected_dist_cols, list) and selected_dist_cols: # Pylance guard
-                    target_col_for_sampling = selected_dist_cols[0]
-            
-            if target_col_for_sampling and target_col_for_sampling != "None" and target_col_for_sampling in df_to_plot.columns:
-                calculated_sample_size = self._calculate_representative_sample_size(df_to_plot, target_col_for_sampling, margin_error_val, confidence_level_val)
-                if calculated_sample_size < df_to_plot.height:
-                    df_to_plot = df_to_plot.sample(n=calculated_sample_size, shuffle=True, seed=42)
-            else:
-                self.statusBar().showMessage("No valid target column for representative sampling. Using random 10k max if applicable.", 3000)
-                if df_to_plot.height > 10000: df_to_plot = df_to_plot.sample(n=10000, shuffle=True, seed=42)
-        
-        if df_to_plot.is_empty():
-            QMessageBox.warning(self, "Sampling Error", "Data became empty after sampling. Cannot generate plot."); return
-        self.plot_data_info_label.setText(f"<b>No. of Rows used for Plotting:</b></br> {df_to_plot.height} <br/>")
-
-        basic_args = {k: self._get_widget_value(w) for k, w in self.basic_config_widgets.items()}
-        advanced_args = {}
-        adv_config_source_dict, current_advanced_group = {}, None
-        if plot_type == "Distribution Plot (Distplot)": adv_config_source_dict, current_advanced_group = self.distplot_advanced_widgets, self.distplot_advanced_group
-        elif plot_type == "Pie Chart": adv_config_source_dict, current_advanced_group = self.pie_advanced_widgets, self.pie_advanced_group
-        else: adv_config_source_dict, current_advanced_group = self.advanced_config_widgets, self.advanced_group
-        if current_advanced_group and current_advanced_group.isChecked(): advanced_args = {k: self._get_widget_value(w) for k, w in adv_config_source_dict.items()}
-        
-        try:
-            self.fig.clear()
-            pd_df = df_to_plot.to_pandas()
-
-            facet_row = advanced_args.get('facet_row_combo', "None")
-            facet_col = advanced_args.get('facet_col_combo', "None")
-            use_facets = (facet_row != "None" or facet_col != "None") and plot_type not in ["Pie Chart", "Distribution Plot (Distplot)"]
-
-            if use_facets:
-                row_cats = pd_df[facet_row].dropna().unique() if facet_row != "None" else [None]
-                col_cats = pd_df[facet_col].dropna().unique() if facet_col != "None" else [None]
-                axs = self.fig.subplots(len(row_cats), len(col_cats), sharex=True, sharey=True, squeeze=False)
-
-                for r_idx, r_cat in enumerate(row_cats):
-                    for c_idx, c_cat in enumerate(col_cats):
-                        ax = axs[r_idx, c_idx]
-                        facet_df = pd_df
-                        if r_cat is not None: facet_df = facet_df[facet_df[facet_row] == r_cat]
-                        if c_cat is not None: facet_df = facet_df[facet_df[facet_col] == c_cat]
-                        
-                        if facet_df.empty: ax.set_axis_off(); continue
-
-                        self._draw_plot_on_ax(ax, plot_type, facet_df, basic_args, advanced_args)
-                        
-                        if r_idx == 0 and c_cat is not None: ax.set_title(str(c_cat))
-                        if c_idx == 0 and r_cat is not None: ax.set_ylabel(str(r_cat), rotation=0, size='large', ha='right')
-
-                self.current_plot_ax = axs
-            else:
-                ax = self.fig.add_subplot(111)
-                self._draw_plot_on_ax(ax, plot_type, pd_df, basic_args, advanced_args)
-                self.current_plot_ax = ax
-
-            self._apply_matplotlib_layout(self.fig, self.current_plot_ax, advanced_args, basic_args, plot_type)
-            self.canvas.draw()
-            self.statusBar().showMessage("Plot generated successfully.", 3000)
-            self.save_plot_button.setEnabled(True)
-        except Exception as e:
-            QMessageBox.critical(self, "Plot Generation Error", f"An error occurred: {str(e)}")
-            self.statusBar().showMessage(f"Error generating plot: {str(e)}", 5000)
-            print(f"Plot Generation Error: {str(e)}\n{traceback.format_exc()}")
-            self.fig.clear()
-            ax = self.fig.add_subplot(111)
-            ax.text(0.5, 0.5, f"Error: {e}", ha='center', va='center', color='red', wrap=True)
-            self.canvas.draw()
-            self.current_plot_ax = None
-            self.save_plot_button.setEnabled(False)
-
-    def _draw_plot_on_ax(self, ax, plot_type, df_pd, basic_args, advanced_args):
-        plot_drawers = {
-            "Scatter Plot": self._draw_scatter, "Line Plot": self._draw_line, "Bar Chart": self._draw_bar,
-            "Pie Chart": self._draw_pie, "Histogram": self._draw_histogram, "Box Plot": self._draw_box,
-            "Violin Plot": self._draw_violin, "Strip Plot": self._draw_strip, "Density Contour": self._draw_density,
-            "Distribution Plot (Distplot)": self._draw_distplot, "Time Series Plot": self._draw_timeseries,
-        }
-        if plot_type in plot_drawers:
-            plot_drawers[plot_type](ax, df_pd, basic_args, advanced_args)
+        except (OverflowError, ZeroDivisionError, ValueError) as e_calc: 
+            self.statusBar().showMessage(f"Error calculating sample size for '{target_column_name}': {e_calc}. Using random 10k.", 3000)
+            return min(10000, n_total)
 
     def save_current_plot(self):
-        if self.current_plot_ax is None:
+        
+        if self.current_plot_ax is None and not self.fig.get_axes():
             QMessageBox.warning(self, "No Plot", "No plot has been generated yet to save.")
             return
 
@@ -863,154 +1249,8 @@ class VisualWorkshopApp(QMainWindow):
             QMessageBox.critical(self, "Save Plot Error", f"Could not save plot: {str(e)}")
             logger.log_action("VisualWorkshop", "Plot Save Error", f"Error saving plot: {os.path.basename(file_name)}", details={"Error": str(e)})
 
-    def _get_seaborn_kwargs(self, basic_args, advanced_args):
-        kwargs = {}
-        if basic_args.get('color_col') != "None": kwargs['hue'] = basic_args.get('color_col')
-        if basic_args.get('symbol_col') != "None": kwargs['style'] = basic_args.get('symbol_col')
-        if basic_args.get('size_col') != "None": kwargs['size'] = basic_args.get('size_col')
-        if advanced_args.get('colormap_edit'): kwargs['palette'] = advanced_args.get('colormap_edit')
-        return kwargs
-    
-    def _draw_scatter(self, ax, df, basic, adv):
-        sns.scatterplot(data=df, x=basic.get('x_col'), y=basic.get('y_col'), ax=ax, **self._get_seaborn_kwargs(basic, adv))
-
-    def _draw_line(self, ax, df, basic, adv):
-        df_plot = df.sort_values(by=basic.get('x_col')) if basic.get('sort_x', True) else df
-        sns.lineplot(data=df_plot, x=basic.get('x_col'), y=basic.get('y_col'), ax=ax, marker='o', **self._get_seaborn_kwargs(basic, adv))
-
-    def _draw_bar(self, ax, df, basic, adv):
-        orient = 'v' if basic.get('orientation') == 'Vertical' else 'h'
-        x, y = (basic.get('x_col'), basic.get('y_col')) if orient == 'v' else (basic.get('y_col'), basic.get('x_col'))
-        agg_map = {'mean': np.mean, 'sum': np.sum, 'median': np.median}
-        estimator = agg_map.get(basic.get('agg_func'), 'mean') if basic.get('y_col') != 'None' else 'count'
-        sns.barplot(data=df, x=x, y=y, ax=ax, orient=orient, hue=basic.get('color_col') if basic.get('color_col') != 'None' else None,
-                    palette=adv.get('colormap_edit') or None, estimator=estimator)
-
-    def _draw_pie(self, ax, df, basic, adv):
-        names_col, mode = basic.get('names_col'), basic.get('pie_mode')
-        if mode == "Count Occurrences (Rows)":
-            data = df[names_col].value_counts()
-        else:
-            values_col = basic.get('values_col')
-            data = df.groupby(names_col)[values_col].sum()
-        
-        labels, values = data.index, data.values
-        explode = None
-        if adv.get('explode_edit'):
-            try: explode = [float(x.strip()) for x in adv.get('explode_edit').split(',')]
-            except: self.statusBar().showMessage("Invalid explode format.", 2000)
-
-        ax.pie(values, labels=labels, autopct='%1.1f%%', explode=explode, shadow=True, startangle=90)
-        if basic.get('is_donut'):
-            ax.add_artist(Circle((0,0),0.70,fc='white'))
-        ax.axis('equal')
-        ax.set_title(adv.get('plot_title_edit', 'Pie Chart'))
-
-    def _draw_histogram(self, ax, df, basic, adv):
-        sns.histplot(data=df, x=basic.get('x_col'), weights=basic.get('y_col') if basic.get('y_col') != 'None' else None,
-                     hue=basic.get('color_col') if basic.get('color_col') != 'None' else None,
-                     bins=basic.get('nbinsx') or 'auto', kde=basic.get('add_kde', False),
-                     cumulative=basic.get('cumulative_enabled', False), stat=basic.get('histnorm', 'count').lower(),
-                     ax=ax, palette=adv.get('colormap_edit') or None)
-
-    def _draw_box(self, ax, df, basic, adv):
-        orient = 'v' if basic.get('orientation') == 'Vertical' else 'h'
-        x, y = (basic.get('x_col'), basic.get('y_col')) if orient == 'v' else (basic.get('y_col'), basic.get('x_col'))
-        if x == 'None': x = None
-        sns.boxplot(data=df, x=x, y=y, hue=basic.get('color_col') if basic.get('color_col') != 'None' else None,
-                    orient=orient, notch=basic.get('notched', False), ax=ax, palette=adv.get('colormap_edit') or None)
-
-    def _draw_violin(self, ax, df, basic, adv):
-        orient = 'v' if basic.get('orientation') == 'Vertical' else 'h'
-        x, y = (basic.get('x_col'), basic.get('y_col')) if orient == 'v' else (basic.get('y_col'), basic.get('x_col'))
-        if x == 'None': x = None
-        split = False
-        hue = basic.get('color_col') if basic.get('color_col') != 'None' else None
-        if basic.get('split_by_col') != 'None':
-            hue = basic.get('split_by_col')
-            if len(df[hue].unique()) == 2: split = True
-        sns.violinplot(data=df, x=x, y=y, hue=hue, split=split, orient=orient, 
-                       inner='box' if basic.get('box_visible') else 'quartile', ax=ax, palette=adv.get('colormap_edit') or None)
-
-    def _draw_strip(self, ax, df, basic, adv):
-        orient = 'v' if basic.get('orientation') == 'Vertical' else 'h'
-        x, y = (basic.get('x_col'), basic.get('y_col')) if orient == 'v' else (basic.get('y_col'), basic.get('x_col'))
-        if x == 'None': x = None
-        sns.stripplot(data=df, x=x, y=y, hue=basic.get('color_col') if basic.get('color_col') != 'None' else None,
-                      orient=orient, jitter=basic.get('add_jitter', True), ax=ax, palette=adv.get('colormap_edit') or None)
-
-    def _draw_density(self, ax, df, basic, adv):
-        sns.kdeplot(data=df, x=basic.get('x_col'), y=basic.get('y_col'),
-                    hue=basic.get('color_col') if basic.get('color_col') != 'None' else None,
-                    fill=basic.get('fill_contour', True), ax=ax, palette=adv.get('colormap_edit') or None)
-
-    def _draw_distplot(self, ax, df, basic, adv):
-        cols_to_plot = basic.get('hist_data_cols_list', [])
-        if not cols_to_plot:
-            ax.text(0.5, 0.5, "No columns selected.", ha='center', va='center'); return
-        for col in cols_to_plot:
-            sns.kdeplot(data=df, x=col, ax=ax, label=col, fill=basic.get('show_hist', True), 
-                        cut=0, cumulative=False, 
-                        # rug=basic.get('show_rug', False)
-                        )
-        if len(cols_to_plot) > 1: ax.legend()
-
-    def _draw_timeseries(self, ax, df, basic, adv):
-        x_col, y_col = basic.get('x_col'), basic.get('y_col')
-        df_plot = df.sort_values(by=x_col) if basic.get('sort_x', True) else df
-        if basic.get('budget_col') != "None": ax.bar(df_plot[x_col], df_plot[basic.get('budget_col')], label='Budgeted', color='sandybrown', alpha=0.6)
-        if basic.get('forecast_lower_col') != "None" and basic.get('forecast_upper_col') != "None":
-            ax.fill_between(df_plot[x_col], df_plot[basic.get('forecast_lower_col')], df_plot[basic.get('forecast_upper_col')], color='gray', alpha=0.3, label='Forecast CI')
-        if basic.get('forecast_col') != "None": ax.plot(df_plot[x_col], df_plot[basic.get('forecast_col')], 'k--', label='Forecast')
-        if basic.get('add_ma'):
-            window = basic.get('ma_window', 7)
-            ma_series = df_plot[y_col].rolling(window=window).mean()
-            ax.plot(df_plot[x_col], ma_series, color='lightseagreen', label=f'{window}-period MA')
-        if basic.get('add_trendline'):
-            sns.regplot(data=df_plot, x=x_col, y=y_col, ax=ax, scatter=False, color='purple', line_kws={'linestyle':'--'}, label='Trendline')
-        ax.plot(df_plot[x_col], df_plot[y_col], 'o-', color='royalblue', label='Actual')
-        if basic.get('y2_col') != "None":
-            ax2 = ax.twinx()
-            ax2.plot(df_plot[x_col], df_plot[basic.get('y2_col')], '.-', color='firebrick', label=basic.get('y2_col'))
-            ax2.set_ylabel(basic.get('y2_col'))
-            ax2.legend(loc='upper right')
-        ax.legend(loc='upper left')
-
-    def _apply_matplotlib_layout(self, fig, ax, advanced_args, basic_args, plot_type):
-        if ax is None: return
-        axs = ax.flatten() if isinstance(ax, np.ndarray) else [ax]
-        title = advanced_args.get('plot_title_edit') or f"{plot_type}"
-        fig.suptitle(title, fontsize=16)
-        
-        main_ax = axs[0]
-        main_ax.set_xlabel(advanced_args.get('xaxis_label_edit') or basic_args.get('x_col'))
-        main_ax.set_ylabel(advanced_args.get('yaxis_label_edit') or basic_args.get('y_col'))
-        
-        legend_title = advanced_args.get('legend_title_edit')
-        if not legend_title:
-            if basic_args.get('color_col', 'None') != 'None': legend_title = basic_args.get('color_col')
-            elif basic_args.get('symbol_col', 'None') != 'None': legend_title = basic_args.get('symbol_col')
-
-        if legend_title:
-            try:
-                handles, labels = main_ax.get_legend_handles_labels()
-                if handles: main_ax.legend(title=legend_title)
-            except (AttributeError, IndexError): pass
-
-        for current_ax in axs:
-            if advanced_args.get('log_x_check'): current_ax.set_xscale('log')
-            if advanced_args.get('log_y_check'): current_ax.set_yscale('log')
-            try:
-                if advanced_args.get('xaxis_range_edit'):
-                    min_val, max_val = map(float, advanced_args.get('xaxis_range_edit').split(','))
-                    current_ax.set_xlim(min_val, max_val)
-                if advanced_args.get('yaxis_range_edit'):
-                    min_val, max_val = map(float, advanced_args.get('yaxis_range_edit').split(','))
-                    current_ax.set_ylim(min_val, max_val)
-            except (ValueError, IndexError):
-                self.statusBar().showMessage("Invalid axis range format. Use 'min,max'.", 2000)
-
     def _get_widget_value(self, widget):
+        
         if isinstance(widget, QComboBox): return widget.currentText()
         if isinstance(widget, QLineEdit): return widget.text()
         if isinstance(widget, QTextEdit): return widget.toPlainText()
@@ -1021,42 +1261,239 @@ class VisualWorkshopApp(QMainWindow):
         return None
 
     def closeEvent(self, event):
+        
         plt.close(self.fig)
         super().closeEvent(event)
 
+    def worker_is_running(self, worker):
+        try:
+            worker.terminate()
+            return worker.currentThread().isRunning()
+        except Exception:
+            return False
+    
+    @Slot()
+    def generate_plot(self):
+        """
+        Main thread method to prepare data and launch the PlotGenerationWorker.
+        """
+        if self.current_df is None or self.current_df.is_empty():
+            QMessageBox.information(self, "No Data", "Please load data before generating a plot.")
+            return
+            
+        if self.plot_worker is not None and self.worker_is_running(self.plot_worker):
+            QMessageBox.warning(self, "Busy", "A plot is already being generated. Please wait.")
+            return
+
+        self.statusBar().showMessage("Preparing data for plot...", 2000)
+        QApplication.processEvents()
+
+        plot_type = self.plot_type_combo.currentText()
+        
+        df_to_plot = self.current_df
+        
+        if self.sample_random_rb.isChecked():
+            if self.current_df.height > 10000:
+                self.statusBar().showMessage(f"Randomly sampling data from {self.current_df.height} to 10,000 rows...", 3000)
+                df_to_plot = self.current_df.sample(n=10000, shuffle=True, seed=42)
+        elif self.sample_representative_rb.isChecked():
+            margin_error_val = self.margin_error_input_rep.value()
+            confidence_level_val = int(self.ci_combo.currentText())
+            basic_args_temp = {k: self._get_widget_value(w) for k, w in self.basic_config_widgets.items()}
+            
+            target_col_for_sampling = None
+            if plot_type in ["Scatter Plot", "Line Plot", "Bar Chart", "Box Plot", "Violin Plot", "Strip Plot", "Time Series Plot"]: 
+                target_col_for_sampling = basic_args_temp.get('y_col')
+            elif plot_type == "Histogram": 
+                target_col_for_sampling = basic_args_temp.get('x_col')
+            elif plot_type == "Pie Chart": 
+                target_col_for_sampling = basic_args_temp.get('values_col') if basic_args_temp.get('pie_mode') == "Sum Values from Column" else basic_args_temp.get('names_col')
+            elif plot_type == "Density Contour": 
+                target_col_for_sampling = basic_args_temp.get('y_col')
+            elif plot_type == "Distribution Plot (Distplot)":
+                selected_dist_cols_widget = self.basic_config_widgets.get('hist_data_cols_list', [])
+                selected_dist_cols = [cb.text() for cb in selected_dist_cols_widget if cb.isChecked()]
+                if selected_dist_cols:
+                    target_col_for_sampling = selected_dist_cols[0]
+            
+            if target_col_for_sampling and target_col_for_sampling != "None" and target_col_for_sampling in df_to_plot.columns:
+                calculated_sample_size = self._calculate_representative_sample_size(df_to_plot, target_col_for_sampling, margin_error_val, confidence_level_val)
+                if calculated_sample_size < df_to_plot.height:
+                    df_to_plot = df_to_plot.sample(n=calculated_sample_size, shuffle=True, seed=42)
+            else:
+                self.statusBar().showMessage("No valid target column for representative sampling. Using random 10k max if applicable.", 3000)
+                if df_to_plot.height > 10000: 
+                    df_to_plot = df_to_plot.sample(n=10000, shuffle=True, seed=42)
+
+        if df_to_plot.is_empty():
+            QMessageBox.warning(self, "Sampling Error", "Data became empty after sampling. Cannot generate plot."); 
+            return
+        
+        self.plot_data_info_label.setText(f"<b>No. of Rows used for Plotting:</b></br> {df_to_plot.height} <br/>")
+
+        
+        basic_args = {k: self._get_widget_value(w) for k, w in self.basic_config_widgets.items()}
+        advanced_args = {}
+        adv_config_source_dict, current_advanced_group = {}, None
+        if plot_type == "Distribution Plot (Distplot)": 
+            adv_config_source_dict, current_advanced_group = self.distplot_advanced_widgets, self.distplot_advanced_group
+        elif plot_type == "Pie Chart": 
+            adv_config_source_dict, current_advanced_group = self.pie_advanced_widgets, self.pie_advanced_group
+        else: 
+            adv_config_source_dict, current_advanced_group = self.advanced_config_widgets, self.advanced_group
+        
+        if current_advanced_group and current_advanced_group.isChecked(): 
+            advanced_args = {k: self._get_widget_value(w) for k, w in adv_config_source_dict.items()}
+
+        try:
+            
+            pd_df = df_to_plot.to_pandas()
+        except Exception as e:
+            QMessageBox.critical(self, "Data Conversion Error", f"Could not convert Polars to Pandas: {e}")
+            logger.log_action("VisualWorkshop", "Plot Error", "Pandas conversion failed", details={"Error": str(e)})
+            return
+        
+
+        self.statusBar().showMessage(f"Generating {plot_type}... (this may take a moment)", 0) 
+        # self.generate_plot_button.setEnabled(False) 
+        
+        
+        current_figsize = self.fig.get_size_inches()
+        
+        
+        logger.log_action("VisualWorkshop", "Generate Plot", f"Starting plot: {plot_type}",
+            details={"Basic Args": {k:v for k,v in basic_args.items() if k != 'hist_data_cols_list'}, 
+                     "Advanced Args": advanced_args,
+                     "Rows Plotted": df_to_plot.height})
+
+        
+        self.plot_worker = PlotGenerationWorker(
+            plot_type,
+            pd_df,
+            basic_args,
+            advanced_args,
+            current_figsize
+        )
+        self.plot_worker.plot_finished.connect(self.on_plot_generation_finished)
+        self.plot_worker.plot_error.connect(self.on_plot_generation_error)
+        self.plot_worker.plot_status_update.connect(self.on_plot_status_update)
+        
+        self.plot_worker.finished.connect(self.plot_worker.deleteLater) 
+        self.plot_worker.start()
+        # self.plot_worker = None
+
+    @Slot(str)
+    def on_plot_status_update(self, message):
+        """Receives status messages from the worker thread."""
+        self.statusBar().showMessage(message, 3000)
+
+    @Slot(object)
+    def on_plot_generation_finished(self, new_fig):
+        """
+        Receives the completed Figure object from the worker thread.
+        This runs in the main GUI thread.
+        """
+        self.statusBar().showMessage("Plot generated. Rendering...", 2000)
+        
+        
+        
+        # 
+        self.plot_display_layout.removeWidget(self.toolbar)
+        self.plot_display_layout.removeWidget(self.canvas)
+
+        # 
+        self.toolbar.deleteLater()
+        self.canvas.deleteLater()
+        
+        # 
+        self.fig = new_fig
+        
+        # 
+        self.canvas = FigureCanvas(self.fig)
+        self.toolbar = NavigationToolbar(self.canvas, self)
+        
+        # 
+        self.plot_display_layout.addWidget(self.toolbar)
+        self.plot_display_layout.addWidget(self.canvas)
+        
+        # 
+        self.current_plot_ax = self.fig.get_axes()[0] if self.fig.get_axes() else None
+        self.save_plot_button.setEnabled(True)
+        self.generate_plot_button.setEnabled(True)
+        self.statusBar().showMessage("Plot generated successfully.", 3000)
+        logger.log_action("VisualWorkshop", "Plot Success", "Plot rendered successfully.")
+
+    @Slot(str)
+    def on_plot_generation_error(self, error_message):
+        """
+        Receives an error message from the worker thread.
+        This runs in the main GUI thread.
+        """
+        QMessageBox.critical(self, "Plot Generation Error", f"An error occurred in the plotting thread: {error_message}")
+        self.statusBar().showMessage(f"Error generating plot: {error_message}", 5000)
+        logger.log_action("VisualWorkshop", "Plot Error", "Plot generation failed", details={"Error": error_message})
+        
+        
+        self.fig.clear()
+        ax = self.fig.add_subplot(111)
+        ax.text(0.5, 0.5, f"Error: {error_message}", ha='center', va='center', color='red', wrap=True)
+        self.canvas.draw()
+        
+        self.current_plot_ax = None
+        self.save_plot_button.setEnabled(False)
+        self.generate_plot_button.setEnabled(True) 
+
+
+
 if __name__ == '__main__':
     app = QApplication(sys.argv)
+    app.setStyle('Fusion')
+    app.desktopSettingsAware()
+    icon_path = resource_path("vw.ico")
+    app_icon = QIcon(icon_path)           
+    app.setWindowIcon(app_icon)            
+
 
     class DummyPickaxe:
+        
         def get_current_dataframe_for_vw(self):
             import pandas as pd
             np.random.seed(42)
-            n_rows = 120
-            # FIX: Use np.array with dtype=object for lists containing None
+            n_rows = int(10e4)
+            
             data = {
                 'categoryA': np.random.choice(np.array(['Alpha', 'Beta', 'Gamma', 'Delta', None], dtype=object), n_rows, p=[0.2,0.3,0.25,0.15,0.1]),
                 'categoryB': np.random.choice(np.array(['X', 'Y', 'Z', None], dtype=object), n_rows, p=[0.4,0.3,0.2,0.1]),
                 'value1': np.random.randn(n_rows) * 100 - 20,
                 'value2': np.random.rand(n_rows) * 50 + 10,
                 'size_col': np.random.rand(n_rows) * 20 + 5,
-                'time_data': pd.to_datetime(pd.date_range(start='2023-01-01', periods=n_rows, freq='D')),
-                'date_data': pd.to_datetime(pd.date_range(start='2022-01-01', periods=n_rows, freq='D')).date,
+                'time_data': pd.to_datetime(pd.date_range(start='2023-01-01', periods=min(n_rows,10000), freq='D')).to_series().sample(n_rows, replace=(10000<n_rows)).to_list(),
+                'date_data': pd.to_datetime(pd.date_range(start='2022-01-01', periods=min(n_rows,10000), freq='D')).to_series().sample(n_rows, replace=(10000<n_rows)).to_list(),
                 'bool_data': np.random.choice(np.array([True, False, None], dtype=object), n_rows, p=[0.45,0.4,0.15]),
             }
-            df = pl.from_pandas(pd.DataFrame(data))
-            df = df.with_row_count("__original_index__")
+            df = pl.DataFrame(data)
+            df = df.with_row_index("__original_index__")
             return df
 
         def get_current_filename_hint_for_vw(self):
             return "DummyData.csv"
         
+        @property
+        def current_log_file_path(self):
+             
+            log_path = os.path.join(os.getcwd(), ".__log__dummy_pickaxe_session.md")
+            if not hasattr(self, '_dummy_logger_set'):
+                logger.set_log_file(log_path, "DummyPickaxe", "DummyData.csv")
+                self._dummy_logger_set = True
+            return log_path
+
     dummy_pickaxe_instance = DummyPickaxe()
-    window = VisualWorkshopApp(pickaxe_instance=dummy_pickaxe_instance)
+    window = VisualWorkshopApp(pickaxe_instance=dummy_pickaxe_instance, log_file_to_use=dummy_pickaxe_instance.current_log_file_path)
     initial_df = dummy_pickaxe_instance.get_current_dataframe_for_vw()
     initial_hint = dummy_pickaxe_instance.get_current_filename_hint_for_vw()
     
     if initial_df is not None:
-         window.receive_dataframe(initial_df, initial_hint)
+         window.receive_dataframe(initial_df, initial_hint, log_file_path_from_source=dummy_pickaxe_instance.current_log_file_path)
 
     window.show()
     sys.exit(app.exec())
