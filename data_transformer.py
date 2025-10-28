@@ -3,6 +3,8 @@ import sys
 import os
 import re
 import polars as pl
+import numpy as np
+import math
 import json
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -1812,7 +1814,7 @@ class DataTransformer(QMainWindow):
         df_shape_before = self.current_df.shape
         self._push_to_undo_stack(operation_description=f"Applied expression to '{field_name}'", operation_type="expression")
         try:
-            eval_context = {"pl": pl}
+            eval_context = {"pl": pl, "np": np, "math": math}
             eval_context.update({col: pl.col(col) for col in self.current_df.columns})
 
             polars_expr_obj = eval(expression_str, eval_context)
