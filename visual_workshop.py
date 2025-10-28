@@ -156,7 +156,8 @@ class PlotGenerationWorker(QThread):
             "Distribution Plot (Distplot)": self._draw_distplot, "Time Series Plot": self._draw_timeseries,
         }
         if plot_type in plot_drawers:
-            plot_drawers[plot_type](ax, df_pd, basic_args, advanced_args)
+            mentioned_columns = [c for c in list(dict.fromkeys(list(basic_args.values()) + list(advanced_args.values()))) if c in df_pd.columns]
+            plot_drawers[plot_type](ax, df_pd.loc[:, mentioned_columns], basic_args, advanced_args)
 
     def _draw_scatter(self, ax, df, basic, adv):
         sns.scatterplot(data=df, x=basic.get('x_col'), y=basic.get('y_col'), ax=ax, **self._get_seaborn_kwargs(basic, adv))
@@ -184,13 +185,13 @@ class PlotGenerationWorker(QThread):
             estimator = estimator_val
 
         hue_col = basic.get('color_col') if basic.get('color_col') != 'None' else None
-        
+        if hue_col:
+            df[hue_col] = df[hue_col].astype(str)
         
         palette = self._get_seaborn_kwargs(basic, adv).get('palette')
 
         dodge = True
         if hue_col and basic.get('barmode') == 'Stack':
-            
             
             dodge = False 
             self.plot_status_update.emit("Stack mode not supported by sns.barplot. Overlaying instead.")
@@ -269,14 +270,19 @@ class PlotGenerationWorker(QThread):
         palette = self._get_seaborn_kwargs(basic, adv).get('palette')
 
     def _draw_histogram(self, ax, df, basic, adv):
+        hue_col = basic.get('color_col') if basic.get('color_col') != 'None' else None
+        if hue_col:
+            df[hue_col] = df[hue_col].astype(str)
+            
         sns.histplot(data=df, 
                      x=basic.get('x_col'), 
                      weights=basic.get('y_col') if basic.get('y_col') != 'None' else None,
-                     hue=basic.get('color_col') if basic.get('color_col') != 'None' else None,
+                     hue=hue_col,
                      bins=basic.get('nbinsx') or 'auto', 
                      kde=basic.get('add_kde', False),
                      cumulative=basic.get('cumulative_enabled', False), 
                      stat=basic.get('histnorm', 'count').lower(),
+                     multiple="layer", element="bars", fill=True,
                      ax=ax,
                      palette=self._get_seaborn_kwargs(basic, adv).get('palette'))
 
@@ -284,7 +290,10 @@ class PlotGenerationWorker(QThread):
         orient = 'v' if basic.get('orientation') == 'Vertical' else 'h'
         x, y = (basic.get('x_col'), basic.get('y_col')) if orient == 'v' else (basic.get('y_col'), basic.get('x_col'))
         if x == 'None': x = None
-        sns.boxplot(data=df, x=x, y=y, hue=basic.get('color_col') if basic.get('color_col') != 'None' else None,
+        hue_col = basic.get('color_col') if basic.get('color_col') != 'None' else None
+        if hue_col:
+            df[hue_col] = df[hue_col].astype(str)
+        sns.boxplot(data=df, x=x, y=y, hue=hue_col,
                     orient=orient, notch=basic.get('notched', False), ax=ax,
                     palette=self._get_seaborn_kwargs(basic, adv).get('palette'))
 
@@ -295,7 +304,9 @@ class PlotGenerationWorker(QThread):
         
         split = False
         hue = basic.get('color_col') if basic.get('color_col') != 'None' else None
-        
+        if hue:
+            df[hue] = df[hue].astype(str)
+            
         if basic.get('split_by_col') != 'None':
             hue = basic.get('split_by_col')
             if hue and hue in df.columns and df[hue].nunique() == 2: 
@@ -313,13 +324,19 @@ class PlotGenerationWorker(QThread):
         orient = 'v' if basic.get('orientation') == 'Vertical' else 'h'
         x, y = (basic.get('x_col'), basic.get('y_col')) if orient == 'v' else (basic.get('y_col'), basic.get('x_col'))
         if x == 'None': x = None
-        sns.stripplot(data=df, x=x, y=y, hue=basic.get('color_col') if basic.get('color_col') != 'None' else None,
+        hue_col = basic.get('color_col') if basic.get('color_col') != 'None' else None
+        if hue_col:
+            df[hue_col] = df[hue_col].astype(str)
+        sns.stripplot(data=df, x=x, y=y, hue=hue_col,
                       orient=orient, jitter=basic.get('add_jitter', True), ax=ax,
                       palette=self._get_seaborn_kwargs(basic, adv).get('palette'))
 
     def _draw_density(self, ax, df, basic, adv):
+        hue_col = basic.get('color_col') if basic.get('color_col') != 'None' else None
+        if hue_col:
+            df[hue_col] = df[hue_col].astype(str)
         sns.kdeplot(data=df, x=basic.get('x_col'), y=basic.get('y_col'),
-                    hue=basic.get('color_col') if basic.get('color_col') != 'None' else None,
+                    hue=hue_col,
                     fill=basic.get('fill_contour', True), ax=ax,
                      palette=self._get_seaborn_kwargs(basic, adv).get('palette'))
 
