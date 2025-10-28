@@ -11,6 +11,13 @@
             "request": "launch",
             "program": "starter.py",
             "console": "integratedTerminal"
+        },
+        {
+            "name": "VSC: Python Debugger (Current File)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal"
         }
     ]
 }
