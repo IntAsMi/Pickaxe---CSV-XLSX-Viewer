@@ -23,7 +23,6 @@ import xml.etree.ElementTree as ET
 import codecs
 from pathlib import Path
 from openpyxl import load_workbook
-from tabulate import tabulate
 import xlrd
 from operation_logger import logger 
 import threading

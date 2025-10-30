@@ -2,7 +2,7 @@
 ; SEE THE DOCUMENTATION FOR DETAILS ON CREATING INNO SETUP SCRIPT FILES!
 
 #define MyAppName "P!ckAxe"
-#define MyAppVersion "2.0"
+#define MyAppVersion "2.0.1"
 #define MyAppPublisher "Matthew Camilleri"
 #define MyAppURL "https://github.com/IntAsMi/Pickaxe---CSV-XLSX-Viewer"
 #define MyAppExeName "Pickaxe.exe"
@@ -42,12 +42,12 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-Source: "C:\Users\Matthew\GitHub\Pickaxe---CSV-XLSX-Viewer\build\exe.win-amd64-3.12\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "C:\Users\Matthew\GitHub\Pickaxe---CSV-XLSX-Viewer\build\exe.win-amd64-3.12\magic-wand.ico"; DestDir: "{app}"; Flags: ignoreversion
-Source: "C:\Users\Matthew\GitHub\Pickaxe---CSV-XLSX-Viewer\build\exe.win-amd64-3.12\pickaxe.ico"; DestDir: "{app}"; Flags: ignoreversion
-Source: "C:\Users\Matthew\GitHub\Pickaxe---CSV-XLSX-Viewer\build\exe.win-amd64-3.12\settings.ico"; DestDir: "{app}"; Flags: ignoreversion
-Source: "C:\Users\Matthew\GitHub\Pickaxe---CSV-XLSX-Viewer\build\exe.win-amd64-3.12\vw.ico"; DestDir: "{app}"; Flags: ignoreversion
-Source: "C:\Users\Matthew\GitHub\Pickaxe---CSV-XLSX-Viewer\build\exe.win-amd64-3.12\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "C:\Users\Matthew\GitHub\Pickaxe---CSV-XLSX-Viewer\build\exe.win-amd64-3.13\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "C:\Users\Matthew\GitHub\Pickaxe---CSV-XLSX-Viewer\build\exe.win-amd64-3.13\magic-wand.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "C:\Users\Matthew\GitHub\Pickaxe---CSV-XLSX-Viewer\build\exe.win-amd64-3.13\pickaxe.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "C:\Users\Matthew\GitHub\Pickaxe---CSV-XLSX-Viewer\build\exe.win-amd64-3.13\settings.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "C:\Users\Matthew\GitHub\Pickaxe---CSV-XLSX-Viewer\build\exe.win-amd64-3.13\vw.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "C:\Users\Matthew\GitHub\Pickaxe---CSV-XLSX-Viewer\build\exe.win-amd64-3.13\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; NOTE: Don't use "Flags: ignoreversion" on any shared system files
 
 [Icons]

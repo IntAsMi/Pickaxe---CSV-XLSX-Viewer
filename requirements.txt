@@ -2,18 +2,16 @@
 polars
 PySide6
 scipy
-# File format support for Pickaxe/DataTransformer
-openpyxl       # For .xlsx reading/writing (Polars read_excel can use it)
-xlrd           # For .xls reading (Polars read_excel can use it)
-pyxlsb         # For .xlsb reading (explicitly imported in get_sheet_names)
-xlsx2csv       # For converting large Excel files to CSV in Pickaxe
-chardet        # For CSV encoding detection in Pickaxe
+openpyxl       
+xlrd           
+pyxlsb         
+xlsx2csv    
+chardet       
 fastexcel
 xlsxwriter
 pyarrow
 fuzzywuzzy 
 python-Levenshtein
-tabulate
 numpy
 hickle
 cx_Freeze
