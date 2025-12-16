@@ -10,9 +10,14 @@ from PySide6.QtGui import QPainter, QAction, QIcon, QFont, QColor, QDesktopServi
 
 import numpy as np # For .npz files
 import pickle      # For .pkl files
-import hickle
+try:
+    import hickle    # For .hkl files
+    HICKLE_AVAILABLE = True
+except ImportError:
+    HICKLE_AVAILABLE = False
+    print("Warning: 'hickle' library not found. .hkl file support will be disabled.")
+
 import time
-from pathlib import Path
 from chardet import detect
 from csv import Sniffer, QUOTE_MINIMAL, excel
 from datetime import datetime
@@ -23,6 +28,7 @@ import xml.etree.ElementTree as ET
 import codecs
 from pathlib import Path
 from openpyxl import load_workbook
+from tabulate import tabulate
 import xlrd
 from operation_logger import logger 
 import threading
@@ -55,7 +61,7 @@ def resource_path(relative_path):
     if hasattr(sys, r'_MEIPASS') :
         try:
             # PyInstaller/Nuitka creates a temp folder and stores path in _MEIPASS
-            base_path = sys._MEIPASS # type: ignore
+            base_path = sys._MEIPASS
         except AttributeError: # AttributeError if _MEIPASS is not set (e.g. running as script)
             base_path = os.path.abspath(".")
     else:
@@ -77,7 +83,8 @@ def get_sheet_names(file_name):
         try:
             with ZipFile(file_name) as archive:
                 if 'xl/workbook.xml' not in archive.namelist():
-                    return load_workbook(file_name, read_only=True, data_only=True).sheetnames
+                    with load_workbook(file_name, read_only=True, data_only=True) as wb_openpyxl:
+                        return wb_openpyxl.sheetnames
                 tree = ET.parse(archive.open('xl/workbook.xml'))
                 root = tree.getroot()
                 ns = {'main': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
@@ -87,7 +94,8 @@ def get_sheet_names(file_name):
                     sheets_data.append({'name': name})
                 return [s['name'] for s in sheets_data]
         except Exception:
-            return load_workbook(file_name, read_only=True, data_only=True) .sheetnames
+            with load_workbook(file_name, read_only=True, data_only=True) as workbook:
+                return workbook.sheetnames
     else:
         raise ValueError(f"Unsupported file format: {file_name}")
 
@@ -186,7 +194,7 @@ class ContainerFileNavigator:
             if file_type == 'pickle':
                 with open(file_path, 'rb') as f:
                     data_object = pickle.load(f)
-            elif file_type == 'hickle':
+            elif file_type == 'hickle' and HICKLE_AVAILABLE:
                 data_object = hickle.load(file_path)
             else:
                 return [{"name": f"Unsupported type or library missing for {file_type}", "type": "Error", "shape": "N/A"}]
@@ -228,7 +236,7 @@ class ContainerFileNavigator:
             if file_type == 'pickle':
                 with open(file_path, 'rb') as f:
                     data_object = pickle.load(f)
-            elif file_type == 'hickle':
+            elif file_type == 'hickle' and HICKLE_AVAILABLE:
                 data_object = hickle.load(file_path)
             else:
                 raise ValueError(f"Unsupported type or library missing for {file_type}")
@@ -253,7 +261,7 @@ class ContainerFileNavigator:
 
 
 class FileLoaderWorker(QThread): # QThread is good if UI interaction is needed via signals
-    request_excel_to_csv_conversion = Signal(str)
+    # Add signals for UI interaction if ContainerFileNavigator needs to prompt user
     request_npz_array_selection = Signal(list, str) # list of array_info, file_path
     npz_array_selected = Signal(str) # selected array name
 
@@ -278,8 +286,7 @@ class FileLoaderWorker(QThread): # QThread is good if UI interaction is needed v
         self.selected_npz_array_name = None
         self.selected_pickle_item_path = None
         self.selection_event = threading.Event()
-        self.excel_conversion_event = threading.Event()
-        self.user_wants_csv_conversion = False
+
 
 
     def wait_for_file_access(self, file_path, max_attempts=10, delay=1):
@@ -310,7 +317,30 @@ class FileLoaderWorker(QThread): # QThread is good if UI interaction is needed v
         current_path_for_reading = self.file_path 
         file_ext = os.path.splitext(current_path_for_reading)[1].lower()
 
-        try:            
+        try:
+            if file_ext in ['.xlsx', '.xlsm', '.xlsb', '.xls'] and \
+               os.path.getsize(current_path_for_reading) >= 1000 * (2**10 * 2**10) and \
+               False:
+                print(f"Converting Excel file '{os.path.basename(current_path_for_reading)}' to CSV...", file=sys.__stdout__)
+                output_csv_path = Path(tempfile.gettempdir()).joinpath(
+                    f"{Path(current_path_for_reading).stem.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+                )
+                from xlsx2csv import Xlsx2csv 
+                converter = Xlsx2csv(current_path_for_reading, outputencoding="utf-8", delimiter=',') 
+                converter.convert(str(output_csv_path), sheetname=self.sheet_name)
+                print(f"Excel file '{os.path.basename(current_path_for_reading)}' converted to CSV: {output_csv_path}", file=sys.__stdout__)
+                
+                current_path_for_reading = str(output_csv_path) # Update path to read from the temp CSV
+                file_ext = '.csv' # Update extension for further processing
+                
+                if output_csv_path.exists() and output_csv_path.stat().st_size > 0 and self.wait_for_file_access(current_path_for_reading):
+                    df_temp, csv_file_info = self.read_csv(current_path_for_reading) 
+                    df = df_temp
+                    file_info.update(csv_file_info)
+                    file_info['source_format'] = 'Excel (Large, converted to CSV)'
+                else:
+                    raise Exception("Converted CSV is empty or inaccessible.")
+            
             # Re-check file_ext as it might have changed if Excel was converted to CSV
             if file_ext == '.csv':
                 # If df is already loaded (from Excel->CSV conversion), don't reload
@@ -332,10 +362,13 @@ class FileLoaderWorker(QThread): # QThread is good if UI interaction is needed v
                 df = self.handle_pickle_hickle_load(current_path_for_reading, 'pickle')
                 file_info['source_format'] = 'Pickle'
             elif file_ext in ['.hkl', '.hickle'] :
-                df = self.handle_pickle_hickle_load(current_path_for_reading, 'hickle')
-                file_info['source_format'] = 'Hickle'
+                if HICKLE_AVAILABLE:
+                    df = self.handle_pickle_hickle_load(current_path_for_reading, 'hickle')
+                    file_info['source_format'] = 'Hickle'
+                else:
+                    raise ValueError("Hickle library not installed. Cannot read .hkl files.")
             elif file_ext == '.json': 
-                df = pl.read_json(current_path_for_reading)
+                df = pl.read_json(current_path_for_reading, n_rows=self.nrows)
                 file_info['source_format'] = 'JSON'
             elif file_ext in ['.jsonl', '.ndjson']: 
                 df = pl.read_ndjson(current_path_for_reading, n_rows=self.nrows)
@@ -348,7 +381,7 @@ class FileLoaderWorker(QThread): # QThread is good if UI interaction is needed v
             else:
                 # If we reach here and df is still None, it means an unhandled extension
                 # or an Excel that wasn't converted (e.g., too small) but also wasn't handled by the Excel block
-                if df is None and current_path_for_reading != '': 
+                if df is None: 
                     raise ValueError(f"Unsupported or unhandled file format: {file_ext}")
 
             if df is not None:
@@ -376,75 +409,30 @@ class FileLoaderWorker(QThread): # QThread is good if UI interaction is needed v
 
 
     def read_excel(self, filename, sheet_name=None, nrows=None):
-        try:
-            # First attempt to read directly
-            list_sheetnames = get_sheet_names(filename)
-            opened_sheet = sheet_name if (sheet_name is not None and sheet_name in list_sheetnames and len(list_sheetnames) > 1) else list_sheetnames[0]
-            
-            df = pl.read_excel(
-                source = filename,
-                sheet_name=opened_sheet,
-                infer_schema_length=0,
-                # read_csv_options={'infer_schema_length': 0}
-            )
 
-            if nrows is not None and nrows > 0:
-                df = df.slice(0, nrows)
+        list_sheetnames = get_sheet_names(filename)
+        opened_sheet = sheet_name if (sheet_name is not None and (sheet_name in list_sheetnames) and (len(list_sheetnames)>1)) else list_sheetnames[0]
+        df = pl.read_excel(
+            filename,
+            sheet_name=opened_sheet,
+            infer_schema_length=0
+        )
 
-            if self.dtype_is_str:
-                df = df.select([pl.all().cast(pl.Utf8)])
+        if nrows is not None and nrows > 0 :
+            df = df.slice(0, nrows)
 
-            file_info = {
-                'filename': filename, 'sheet_name': opened_sheet, 'total_sheets': len(list_sheetnames),
-                'rows': df.height, 'columns': df.width, 'size': os.path.getsize(filename) / (1024 * 1024),
-                'source_format': 'Excel'
-            }
-            return df, file_info
-        
-        except Exception as e:
-            # If the direct read fails, ask the user about CSV conversion
-            print(f"Direct Excel read failed: {e}. Requesting user input for CSV conversion.")
-            self.excel_conversion_event.clear()
-            self.request_excel_to_csv_conversion.emit(filename) # Signal to GUI
-            self.excel_conversion_event.wait(timeout=60) # Wait for user's choice
+        if self.dtype_is_str:
+             df = df.select([pl.all().cast(pl.Utf8)])
 
-            if hasattr(self, 'user_wants_csv_conversion') and self.user_wants_csv_conversion:
-                # User said yes. Proceed with conversion.
-                print("User approved CSV conversion. Attempting now...")
-                try:
-                    output_csv_path = Path(tempfile.gettempdir()).joinpath(
-                        f"{Path(filename).stem.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-                    )
-                    from xlsx2csv import Xlsx2csv
-                    list_sheetnames_again = get_sheet_names(filename)
-                    opened_sheet_again = sheet_name if sheet_name and sheet_name in list_sheetnames_again else list_sheetnames_again[0]
-                    
-                    converter = Xlsx2csv(filename, outputencoding="utf-8", delimiter=',')
-                    converter.convert(str(output_csv_path), sheetname=opened_sheet_again)
-                    
-                    if self.wait_for_file_access(str(output_csv_path)):
-                        df_csv, csv_file_info = self.read_csv(str(output_csv_path))
-                        csv_file_info['source_format'] = 'Excel (converted to CSV after fail)'
-                        csv_file_info['original_filename'] = filename
-                        csv_file_info['sheet_name'] = opened_sheet_again
-                        # Keep the file info pointing to the original excel file for user display
-                        csv_file_info['filename'] = filename
-                        csv_file_info['size'] = os.path.getsize(filename) / (1024*1024)
-                        return df_csv, csv_file_info
-                    else:
-                        raise Exception("Conversion to CSV resulted in an empty or inaccessible file.")
-                except Exception as conversion_error:
-                    raise Exception(f"Initial read failed. CSV conversion also failed: {conversion_error}") from e
-            else:
-                # User said no or timed out. Re-raise the original exception.
-                raise Exception("Failed to read Excel file directly and user declined CSV conversion attempt.") from e
-
-    # Add this new slot method to the FileLoaderWorker class
-    @Slot(bool)
-    def on_excel_conversion_choice(self, proceed_with_conversion):
-        self.user_wants_csv_conversion = proceed_with_conversion
-        self.excel_conversion_event.set()
-
+        file_info = {
+            'filename': filename,
+            'sheet_name': opened_sheet,
+            'total_sheets': len(list_sheetnames),
+            'rows': df.height,
+            'columns': df.width,
+            'size': os.path.getsize(filename) / (1024 * 1024)
+        }
+        return df, file_info
 
     def handle_npz_load(self, file_path):
         contents = self.navigator.inspect_npz(file_path)
@@ -518,12 +506,11 @@ class FileLoaderWorker(QThread): # QThread is good if UI interaction is needed v
                     dialect = excel; dialect.delimiter = ','; dialect.quotechar = '"'
                 else:
                     sniffer_instance = Sniffer()
-                    dialect = sniffer_instance.sniff(sample, delimiters=',;\t|')
+                    dialect = sniffer_instance.sniff(sample, delimiters=[',', ';', '\t', '|'])
                     if len(sample) > 100 and dialect.delimiter not in sample[:100]:
                         char_count = {char: sample.count(char) for char in [',', ';', '\t', '|'] if char in sample[:max(1000,len(sample)//10)]}
                         if char_count:
-                            dialect.delimiter = max(char_count, key=lambda k: char_count[k])
-
+                            dialect.delimiter = max(char_count, key=char_count.get)
         except Exception:
             dialect = excel
             dialect.delimiter = ','
@@ -632,6 +619,8 @@ class FileLoaderWorker(QThread): # QThread is good if UI interaction is needed v
         raise ValueError("Pickled object is not a Polars/Pandas DataFrame, NumPy array, or list of dicts.")
 
     def read_hickle(self, file_path):
+        if not HICKLE_AVAILABLE:
+             raise ImportError("Hickle library is not installed. Cannot read .hkl files.")
         data_object = hickle.load(file_path)
         # Similar conversion logic as pickle
         if isinstance(data_object, pl.DataFrame):
@@ -661,28 +650,28 @@ class FilledRowsBarWidget(QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.Antialiasing)
         width = self.width()
         height = self.height()
-        painter.fillRect(0, 0, width, height, QColor(Qt.GlobalColor.lightGray))
-        fill_color = QColor(Qt.GlobalColor.blue)
-        if self.percentage <= 33: fill_color = QColor(Qt.GlobalColor.red)
+        painter.fillRect(0, 0, width, height, QColor(Qt.lightGray))
+        fill_color = QColor(Qt.blue)
+        if self.percentage <= 33: fill_color = QColor(Qt.red)
         elif self.percentage <= 66: fill_color = QColor(255, 165, 0)
-        else: fill_color = QColor(Qt.GlobalColor.green).darker(150)
+        else: fill_color = QColor(Qt.green).darker(150)
         filled_width = int(width * self.percentage / 100.0)
         painter.fillRect(0, 0, filled_width, height, fill_color)
         text = f"{self.percentage:.1f}% filled"
         font = painter.font()
         font.setPointSize(max(8, int(height * 0.6)))
         painter.setFont(font)
-        if fill_color == Qt.GlobalColor.red or \
-           (fill_color == QColor(Qt.GlobalColor.green).darker(150) and self.percentage > 50) or \
+        if fill_color == Qt.red or \
+           (fill_color == QColor(Qt.green).darker(150) and self.percentage > 50) or \
            (fill_color == QColor(255,165,0) and self.percentage > 40) :
             if filled_width > painter.fontMetrics().horizontalAdvance(text) / 1.5 :
-                painter.setPen(Qt.GlobalColor.white)
-            else: painter.setPen(Qt.GlobalColor.black)
-        else: painter.setPen(Qt.GlobalColor.black)
-        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, text)
+                painter.setPen(Qt.white)
+            else: painter.setPen(Qt.black)
+        else: painter.setPen(Qt.black)
+        painter.drawText(self.rect(), Qt.AlignCenter, text)
         painter.end()
 
 class FilterWorker(QThread):
@@ -766,7 +755,7 @@ class FilterWorker(QThread):
     def apply_date_filter(self, column, comparison, filter_string, filter_string2):
         try:
             if self.df.schema[column] == pl.Utf8:
-                 col_expr = pl.col(column).str.to_date(format="%Y-%m-%d", strict=False)
+                 col_expr = pl.col(column).str.to_date(format="%Y-%m-%d", strict=False, ambiguous='earliest')
             else:
                  col_expr = pl.col(column).cast(pl.Date, strict=False)
 
@@ -938,7 +927,7 @@ class FilterWidget(QFrame):
 
     def __init__(self, columns, parent=None):
         super().__init__(parent)
-        self._layout = QHBoxLayout(self)
+        self.layout = QHBoxLayout(self)
         fixed_width = 110
         self.column_combo = QComboBox()
 
@@ -975,8 +964,8 @@ class FilterWidget(QFrame):
 
         self.use_regex_checkbox = QCheckBox("Regex")
         self.regex_help_label = QLabel()
-        self.regex_help_label.setTextFormat(Qt.TextFormat.RichText) # Allow HTML
-        self.regex_help_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction) # Allow clicking links
+        self.regex_help_label.setTextFormat(Qt.RichText) # Allow HTML
+        self.regex_help_label.setTextInteractionFlags(Qt.TextBrowserInteraction) # Allow clicking links
         self.regex_help_label.setOpenExternalLinks(True) # Qt will handle opening the link
         self.regex_help_label.setText('<a href="https://www.regexone.com/">Regex Tutorial</a>')
         self.regex_help_label.setToolTip("Click to open regexone.com for a regex tutorial.")
@@ -1000,22 +989,22 @@ class FilterWidget(QFrame):
         self.date_input2.setDate(default_date)
         self.date_input2.setVisible(False)
 
-        self._layout.addWidget(self.column_combo)
-        self._layout.addWidget(self.field_type_switch)
-        self._layout.addWidget(self.comparison_combo)
-        self._layout.addWidget(self.filter_input)
-        self._layout.addWidget(self.filter_input2)
-        self._layout.addWidget(self.date_input)
-        self._layout.addWidget(self.date_input2)
-        self._layout.addWidget(self.case_sensitive_combo)
-        self._layout.addWidget(self.use_regex_checkbox)
-        self._layout.addWidget(self.regex_help_label) # Add the help label to the layout
-        self._layout.addWidget(self.negate_filter_checkbox)
-        self._layout.addWidget(self.remove_button)
+        self.layout.addWidget(self.column_combo)
+        self.layout.addWidget(self.field_type_switch)
+        self.layout.addWidget(self.comparison_combo)
+        self.layout.addWidget(self.filter_input)
+        self.layout.addWidget(self.filter_input2)
+        self.layout.addWidget(self.date_input)
+        self.layout.addWidget(self.date_input2)
+        self.layout.addWidget(self.case_sensitive_combo)
+        self.layout.addWidget(self.use_regex_checkbox)
+        self.layout.addWidget(self.regex_help_label) # Add the help label to the layout
+        self.layout.addWidget(self.negate_filter_checkbox)
+        self.layout.addWidget(self.remove_button)
 
-        self.filter_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.date_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.date_input2.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.filter_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.date_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.date_input2.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         self.column_combo.currentTextChanged.connect(self.on_column_or_comparison_changed)
         self.field_type_switch.type_changed.connect(self.on_ui_changed_and_emit)
@@ -1134,15 +1123,15 @@ class LogicWidget(QFrame):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._layout = QHBoxLayout(self)
-        self._layout.addStretch()
+        self.layout = QHBoxLayout(self)
+        self.layout.addStretch()
         self.and_radio = QRadioButton("AND")
         self.or_radio = QRadioButton("OR")
         self.and_radio.setChecked(True)
-        self._layout.addWidget(self.and_radio)
-        self._layout.addWidget(self.or_radio)
-        self._layout.addStretch()
-        self._layout.setContentsMargins(0,5,0,5)
+        self.layout.addWidget(self.and_radio)
+        self.layout.addWidget(self.or_radio)
+        self.layout.addStretch()
+        self.layout.setContentsMargins(0,5,0,5)
 
         self.and_radio.toggled.connect(self.logic_changed.emit)
 
@@ -1152,7 +1141,7 @@ class FilterPanel(QWidget):
 
     def __init__(self, columns, parent=None):
         super().__init__(parent)
-        self._layout = QVBoxLayout(self)
+        self.layout = QVBoxLayout(self)
         self.filters = []
         self.logic_widgets = []
         self.columns = columns if columns else []
@@ -1161,7 +1150,7 @@ class FilterPanel(QWidget):
         self.scroll_layout = QVBoxLayout(self.scroll_widget)
         self.scroll_area.setWidget(self.scroll_widget)
         self.scroll_area.setWidgetResizable(True)
-        self._layout.addWidget(self.scroll_area)
+        self.layout.addWidget(self.scroll_area)
         self.button_layout = QHBoxLayout()
         self.add_filter_button = QPushButton("Add Filter Row")
         self.add_filter_button.clicked.connect(self.add_filter)
@@ -1169,7 +1158,7 @@ class FilterPanel(QWidget):
         self.apply_button.setDefault(True)
         self.button_layout.addWidget(self.add_filter_button)
         self.button_layout.addWidget(self.apply_button)
-        self._layout.addLayout(self.button_layout)
+        self.layout.addLayout(self.button_layout)
         if self.columns or True: 
             self.add_filter()
         else:
@@ -1257,9 +1246,9 @@ class PolarsModel(QAbstractTableModel):
     def data_frame(self): return self._data_for_cells # Returns only displayable data
     def rowCount(self, parent=None): return self._row_count
     def columnCount(self, parent=None): return self._column_count
-    def data(self, index, role: int = Qt.ItemDataRole.DisplayRole):
+    def data(self, index, role=Qt.DisplayRole):
         if self._data_for_cells is not None and index.isValid():
-            if role == Qt.ItemDataRole.DisplayRole:
+            if role == Qt.DisplayRole:
                 try:
                     value = self._data_for_cells[index.row(), index.column()]
                     return str(value) if value is not None else ''
@@ -1267,12 +1256,12 @@ class PolarsModel(QAbstractTableModel):
         return None
 
     @Slot(int, Qt.Orientation, int)
-    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
-        if role == Qt.ItemDataRole.DisplayRole:
-            if orientation == Qt.Orientation.Horizontal:
+    def headerData(self, section, orientation, role=Qt.DisplayRole):
+        if role == Qt.DisplayRole:
+            if orientation == Qt.Horizontal:
                 try: return str(self._column_headers[section])
                 except IndexError: return None
-            if orientation == Qt.Orientation.Vertical:
+            if orientation == Qt.Vertical:
                 try: return str(self._index_headers[section])
                 except IndexError: return None
         return None
@@ -1283,7 +1272,7 @@ class AsyncFileLoaderThread(QThread):
     # New signals to relay from worker to main GUI for dialogs
     request_npz_array_selection = Signal(list, str)
     request_pickle_item_selection = Signal(list, str, str)
-    request_excel_to_csv_conversion = Signal(str)
+
 
     def __init__(self, file_path, sheet_name=None, parent_gui=None, parent=None): # Added parent_gui
         super().__init__(parent)
@@ -1297,12 +1286,7 @@ class AsyncFileLoaderThread(QThread):
         # Relay signals from worker_instance to this thread's signals
         self.worker_instance.request_npz_array_selection.connect(self.request_npz_array_selection)
         self.worker_instance.request_pickle_item_selection.connect(self.request_pickle_item_selection)
-        self.worker_instance.request_excel_to_csv_conversion.connect(self.request_excel_to_csv_conversion)
-        
-    @Slot(bool)
-    def on_excel_conversion_choice_relayed(self, choice):
-        if hasattr(self.worker_instance, 'on_excel_conversion_choice'):
-            self.worker_instance.on_excel_conversion_choice(choice)
+
 
     def run(self):
         try:
@@ -1344,7 +1328,7 @@ class Pickaxe(QMainWindow):
         self.context_menu_selected_column_names = []
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
-        self._layout = QVBoxLayout(self.central_widget)
+        self.layout = QVBoxLayout(self.central_widget)
         
         self.top_button_layout = QHBoxLayout()
         self.file_button = QPushButton("Open File")
@@ -1402,27 +1386,27 @@ class Pickaxe(QMainWindow):
         self.top_button_layout.addWidget(self.vw_button)
         self.top_button_layout.addWidget(self.suggest_conversions_button)
         # self.top_button_layout.addWidget(self.suggest_conversions_button)
-        self._layout.addLayout(self.top_button_layout)
+        self.layout.addLayout(self.top_button_layout)
         self.info_layout = QHBoxLayout()
         self.file_info_label = QLabel("Load a file to see details.")
         self.file_info_label.setWordWrap(True)
         self.column_range_label = QLabel()
         self.info_layout.addWidget(self.file_info_label, 2)
         self.info_layout.addWidget(self.column_range_label, 1)
-        self._layout.addLayout(self.info_layout)
+        self.layout.addLayout(self.info_layout)
 
         self.query_filter_layout = QHBoxLayout()
         self.query_input = QLineEdit()
-        self.query_input.setPlaceholderText("Enter Polars filter expression (e.g., pl.col('Dear') == 'Poni' or pl.col('Name').str.contains(r'(^Gloria\sTonna$)|(El\sCupa\sHangue) '))") # Example with regex
+        self.query_input.setPlaceholderText(r"Enter Polars filter expression (e.g., pl.col('Dear') == 'Poni' or pl.col('Name').str.contains(r'(^Gloria\sTonna$)|(El\sCupa\sHangue) '))") # Example with regex
 
         self.df = None
 
         self.completer = QCompleter(self)
         self.completer_model = QStringListModel(self)
         self.completer.setModel(self.completer_model)
-        self.completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-        self.completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
-        self.completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        self.completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self.completer.setCompletionMode(QCompleter.PopupCompletion)
+        self.completer.setFilterMode(Qt.MatchContains)
         self.query_input.setCompleter(self.completer)
         self.update_completer_model()
 
@@ -1441,7 +1425,7 @@ class Pickaxe(QMainWindow):
         self.query_filter_layout.addWidget(self.query_input)
         self.query_filter_layout.addWidget(self.apply_query_button)
         self.query_filter_layout.addWidget(self.query_help_button)
-        self._layout.addLayout(self.query_filter_layout)
+        self.layout.addLayout(self.query_filter_layout)
 
         self.filter_panel = None
         self.filter_nav_layout = QHBoxLayout()
@@ -1464,37 +1448,37 @@ class Pickaxe(QMainWindow):
         self.nav_button_layout.addWidget(self.prev_columns_button)
         self.nav_button_layout.addWidget(self.next_columns_button)
         self.filter_nav_layout.addLayout(self.nav_button_layout) # Add as a sub-layout
-        self._layout.addLayout(self.filter_nav_layout)
+        self.layout.addLayout(self.filter_nav_layout)
 
 
         self.table_view = QTableView()
-        self.table_view.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
-        self.table_view.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
-        self.table_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table_view.setVerticalScrollMode(QTableView.ScrollPerPixel)
+        self.table_view.setHorizontalScrollMode(QTableView.ScrollPerPixel)
+        self.table_view.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table_view.customContextMenuRequested.connect(self.show_context_menu)
-        self._layout.addWidget(self.table_view)
+        self.layout.addWidget(self.table_view)
         self.table_view.horizontalHeader().setSectionsClickable(True)
-        self.table_view.horizontalHeader().setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.table_view.horizontalHeader().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table_view.horizontalHeader().setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.table_view.horizontalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
         self.table_view.horizontalHeader().customContextMenuRequested.connect(self.show_header_context_menu)
         self.stats_display_layout = QHBoxLayout()
         self.filled_rows_bar = FilledRowsBarWidget()
         self.filled_rows_bar.setFixedSize(120, 20)
-        self.stats_display_layout.addWidget(self.filled_rows_bar, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.stats_display_layout.addWidget(self.filled_rows_bar, 0, Qt.AlignVCenter)
         self.stats_label = QLabel("Select a column to see statistics.")
-        self.stats_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.stats_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.stats_label.setMinimumHeight(40)
         self.stats_label.setWordWrap(True)
-        self.stats_label.setTextFormat(Qt.TextFormat.RichText) # <<< SET TO RICH TEXT
-        self.stats_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction) # Optional: if you ever add links
+        self.stats_label.setTextFormat(Qt.RichText) # <<< SET TO RICH TEXT
+        self.stats_label.setTextInteractionFlags(Qt.TextBrowserInteraction) # Optional: if you ever add links
         self.stats_label.setOpenExternalLinks(True) # Optional
         font = self.stats_label.font()
         font.setPointSize(9)
         self.stats_label.setFont(font)
         self.stats_display_layout.addWidget(self.stats_label, 1)
-        self._layout.addLayout(self.stats_display_layout)
+        self.layout.addLayout(self.stats_display_layout)
         self.model = None
-        self._filepath = r''
+        self._filepath = None
         self.applied_filters_info = []
         self.file_info = {}
         self.current_column_page = 0
@@ -1504,8 +1488,8 @@ class Pickaxe(QMainWindow):
         self.progress_bar.setVisible(False)
         self.progress_label = QLabel()
         self.progress_label.setVisible(False)
-        self._layout.addWidget(self.progress_bar)
-        self._layout.addWidget(self.progress_label)
+        self.layout.addWidget(self.progress_bar)
+        self.layout.addWidget(self.progress_label)
         self.save_button.setEnabled(False)
         self.apply_query_button.setEnabled(False)
         self.filter_toggle_button.setEnabled(False)
@@ -1565,15 +1549,15 @@ class Pickaxe(QMainWindow):
     def _style_button(self, button):
         # Create a simple "logo" for the button
         pixmap = QPixmap(24, 24)
-        pixmap.fill(Qt.GlobalColor.transparent)
+        pixmap.fill(Qt.transparent)
         painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.Antialiasing)
         colors = [QColor("dodgerblue"), QColor("mediumseagreen"), QColor("tomato"), QColor("gold")]
         rect_size = 10
         offsets = [(0,0), (rect_size+2,0), (0, rect_size+2), (rect_size+2, rect_size+2)]
         for i in range(4):
             painter.setBrush(colors[i])
-            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setPen(Qt.NoPen)
             painter.drawRoundedRect(offsets[i][0], offsets[i][1], rect_size, rect_size, 2, 2)
         painter.end()
         button.setIcon(QIcon(pixmap))
@@ -2029,7 +2013,7 @@ class Pickaxe(QMainWindow):
         
         # Join all parts. Use <br> for newlines in HTML.
         # The stats_label needs to support RichText.
-        self.stats_label.setTextFormat(Qt.TextFormat.RichText)
+        self.stats_label.setTextFormat(Qt.RichText)
         self.stats_label.setText("<br>".join(stats_text_parts))
         self.set_stats_label_font_monospaced() # Monospace is good for table-like text
                                 
@@ -2038,8 +2022,8 @@ class Pickaxe(QMainWindow):
         families = ["Courier New", "Consolas", "DejaVu Sans Mono", "Menlo"]
         for family in families:
             font.setFamily(family)
-            if QFont(font.family()).styleHint() == QFont.StyleHint.Monospace: break
-        else: font.setStyleHint(QFont.StyleHint.Monospace)
+            if QFont(font.family()).styleHint() == QFont.Monospace: break
+        else: font.setStyleHint(QFont.Monospace)
         font.setPointSize(9)
         self.stats_label.setFont(font)
 
@@ -2155,8 +2139,8 @@ class Pickaxe(QMainWindow):
             if significant_new_nans:
                 reply = QMessageBox.question(self, "Conversion Warning",
                                              f"Converting '{column_name_to_convert}' to {type_name} resulted in a significant number of new empty values. Proceed?",
-                                             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
-                if reply == QMessageBox.StandardButton.No:
+                                             QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                if reply == QMessageBox.No:
                     self.update_progress(0, "Conversion cancelled.")
                     self.progress_bar.setVisible(False); self.progress_label.setVisible(False)
                     return
@@ -2228,114 +2212,111 @@ class Pickaxe(QMainWindow):
         error_details = []
         user_cancelled_all = False
         yes_to_all_warnings = False
-        df_shape_before_batch_op = 0
         
-        if self.df is not None:
-            
-            df_shape_before_batch_op = self.df.shape if not (self.df.is_empty()) else None
+        df_shape_before_batch_op = self.df.shape if not self.df.is_empty() else None
 
-            for i, col_name in enumerate(selected_names):
-                self.update_progress(int(((i + 0.5) / num_selected) * 100), f"Converting {i+1}/{num_selected}: '{col_name}' to {type_name}...")
-                QApplication.processEvents()
+        for i, col_name in enumerate(selected_names):
+            self.update_progress(int(((i + 0.5) / num_selected) * 100), f"Converting {i+1}/{num_selected}: '{col_name}' to {type_name}...")
+            QApplication.processEvents()
 
-                try:
-                    if col_name not in self.df.columns:
-                        error_details.append(f"'{col_name}': Column not found in DataFrame.")
-                        continue
+            try:
+                if col_name not in self.df.columns:
+                    error_details.append(f"'{col_name}': Column not found in DataFrame.")
+                    continue
 
-                    original_column_series = self.df.get_column(col_name)
-                    original_nulls = original_column_series.is_null().sum()
-                    current_col_schema_dtype = self.df.schema[col_name]
+                original_column_series = self.df.get_column(col_name)
+                original_nulls = original_column_series.is_null().sum()
+                current_col_schema_dtype = self.df.schema[col_name]
 
-                    final_conversion_expr = None
-                    actual_target_polars_type = None 
+                final_conversion_expr = None
+                actual_target_polars_type = None 
 
-                    if type_name == "numeric_float": 
-                        actual_target_polars_type = pl.Float64
-                        final_conversion_expr = pl.col(col_name).cast(pl.Float64, strict=False)
-                    elif type_name == "integer": 
-                        actual_target_polars_type = pl.Int64
-                        final_conversion_expr = pl.col(col_name).cast(pl.Int64, strict=False)
-                    elif type_name == "datetime": 
-                        actual_target_polars_type = pl.Datetime
-                        if current_col_schema_dtype == pl.Utf8:
-                            final_conversion_expr = pl.col(col_name).str.to_datetime(strict=False, time_unit='ns', ambiguous='earliest', format=None).dt.replace_time_zone(None)
-                        else: 
-                            final_conversion_expr = pl.col(col_name).cast(pl.Datetime, strict=False).dt.replace_time_zone(None)
-                    elif type_name == "categorical": 
-                        actual_target_polars_type = pl.Categorical
-                        final_conversion_expr = pl.col(col_name).cast(pl.Categorical, strict=False) # Use strict=False initially
-                    elif type_name == "boolean": # New Boolean type
-                        actual_target_polars_type = pl.Boolean
-                        # Polars' cast to Boolean is quite good with "true"/"false", 0/1
-                        # For more complex strings ("Yes", "No"), pre-processing might be needed
-                        # but for now, a direct cast is a good first step.
-                        # Map common string representations of booleans to actual booleans before casting
-                        if current_col_schema_dtype == pl.Utf8:
-                            col_lower = pl.col(col_name).str.to_lowercase()
-                            final_conversion_expr = (
-                                pl.when(col_lower.is_in(["true", "yes", "1", "t"]))
-                                .then(pl.lit(True, dtype=pl.Boolean))
-                                .when(col_lower.is_in(["false", "no", "0", "f"]))
-                                .then(pl.lit(False, dtype=pl.Boolean))
-                                .otherwise(pl.lit(None, dtype=pl.Boolean)) # Map others to Null
-                            )
-                        else: # If not string, direct cast
-                            final_conversion_expr = pl.col(col_name).cast(pl.Boolean, strict=False)
+                if type_name == "numeric_float": 
+                    actual_target_polars_type = pl.Float64
+                    final_conversion_expr = pl.col(col_name).cast(pl.Float64, strict=False)
+                elif type_name == "integer": 
+                    actual_target_polars_type = pl.Int64
+                    final_conversion_expr = pl.col(col_name).cast(pl.Int64, strict=False)
+                elif type_name == "datetime": 
+                    actual_target_polars_type = pl.Datetime
+                    if current_col_schema_dtype == pl.Utf8:
+                        final_conversion_expr = pl.col(col_name).str.to_datetime(strict=False, time_unit='ns', ambiguous='earliest', format=None).dt.replace_time_zone(None)
+                    else: 
+                        final_conversion_expr = pl.col(col_name).cast(pl.Datetime, strict=False).dt.replace_time_zone(None)
+                elif type_name == "categorical": 
+                    actual_target_polars_type = pl.Categorical
+                    final_conversion_expr = pl.col(col_name).cast(pl.Categorical, strict=False) # Use strict=False initially
+                elif type_name == "boolean": # New Boolean type
+                    actual_target_polars_type = pl.Boolean
+                    # Polars' cast to Boolean is quite good with "true"/"false", 0/1
+                    # For more complex strings ("Yes", "No"), pre-processing might be needed
+                    # but for now, a direct cast is a good first step.
+                    # Map common string representations of booleans to actual booleans before casting
+                    if current_col_schema_dtype == pl.Utf8:
+                        col_lower = pl.col(col_name).str.to_lowercase()
+                        final_conversion_expr = (
+                            pl.when(col_lower.is_in(["true", "yes", "1", "t"]))
+                            .then(pl.lit(True, dtype=pl.Boolean))
+                            .when(col_lower.is_in(["false", "no", "0", "f"]))
+                            .then(pl.lit(False, dtype=pl.Boolean))
+                            .otherwise(pl.lit(None, dtype=pl.Boolean)) # Map others to Null
+                        )
+                    else: # If not string, direct cast
+                        final_conversion_expr = pl.col(col_name).cast(pl.Boolean, strict=False)
 
-                    elif type_name == "string_key": 
-                        actual_target_polars_type = pl.Utf8
-                        final_conversion_expr = pl.col(col_name).cast(pl.Utf8)
-                    elif type_name == "numeric": # Context menu "Convert to Numeric" usually implies float
-                        actual_target_polars_type = pl.Float64
-                        final_conversion_expr = pl.col(col_name).cast(pl.Float64, strict=False)
+                elif type_name == "string_key": 
+                    actual_target_polars_type = pl.Utf8
+                    final_conversion_expr = pl.col(col_name).cast(pl.Utf8)
+                elif type_name == "numeric": # Context menu "Convert to Numeric" usually implies float
+                    actual_target_polars_type = pl.Float64
+                    final_conversion_expr = pl.col(col_name).cast(pl.Float64, strict=False)
 
 
-                    if final_conversion_expr is None:
-                        error_details.append(f"'{col_name}': No conversion logic for target type name '{type_name}'.")
-                        continue
+                if final_conversion_expr is None:
+                    error_details.append(f"'{col_name}': No conversion logic for target type name '{type_name}'.")
+                    continue
+
+                temp_converted_series = self.df.select(final_conversion_expr.alias("___temp_batch_check___")).get_column("___temp_batch_check___")
+                converted_nulls = temp_converted_series.is_null().sum()
+                newly_created_nulls = converted_nulls - original_nulls
+
+                significant_new_nans = False
+                original_non_null_count = self.df.height - original_nulls
+                if original_non_null_count > 0 and (newly_created_nulls / original_non_null_count > 0.1):
+                    significant_new_nans = True
+                elif newly_created_nulls > 0.05 * self.df.height:
+                    significant_new_nans = True
                 
-                    temp_converted_series = self.df.select(final_conversion_expr.alias("___temp_batch_check___")).get_column("___temp_batch_check___")
-                    converted_nulls = temp_converted_series.is_null().sum()
-                    newly_created_nulls = converted_nulls - original_nulls
-
+                if type_name == "string_key" or type_name == "boolean": # Don't usually warn for these if result is mostly nulls as intended
                     significant_new_nans = False
-                    original_non_null_count = self.df.height - original_nulls
-                    if original_non_null_count > 0 and (newly_created_nulls / original_non_null_count > 0.1):
-                        significant_new_nans = True
-                    elif newly_created_nulls > 0.05 * self.df.height:
-                        significant_new_nans = True
+
+
+                if significant_new_nans and not yes_to_all_warnings:
+                    msg_box = QMessageBox(self); msg_box.setIcon(QMessageBox.Warning)
+                    msg_box.setWindowTitle(f"Conversion Warning for '{col_name}'")
+                    msg_box.setText(f"Converting '{col_name}' to {type_name} resulted in {newly_created_nulls} new empty/null values. Proceed with this column?")
+                    yes_button = msg_box.addButton("Yes", QMessageBox.YesRole); no_button = msg_box.addButton("No", QMessageBox.NoRole)
+                    yes_all_button = msg_box.addButton("Yes to All", QMessageBox.AcceptRole); cancel_all_button = msg_box.addButton("Cancel All", QMessageBox.RejectRole)
+                    msg_box.setDefaultButton(yes_button); msg_box.exec()
                     
-                    if type_name == "string_key" or type_name == "boolean": # Don't usually warn for these if result is mostly nulls as intended
-                        significant_new_nans = False
-
-                    if significant_new_nans and not yes_to_all_warnings:
-                        msg_box = QMessageBox(self); msg_box.setIcon(QMessageBox.Icon.Warning)
-                        msg_box.setWindowTitle(f"Conversion Warning for '{col_name}'")
-                        msg_box.setText(f"Converting '{col_name}' to {type_name} resulted in {newly_created_nulls} new empty/null values. Proceed with this column?")
-                        yes_button = msg_box.addButton("Yes", QMessageBox.ButtonRole.YesRole); no_button = msg_box.addButton("No", QMessageBox.ButtonRole.NoRole)
-                        yes_all_button = msg_box.addButton("Yes to All", QMessageBox.ButtonRole.AcceptRole); cancel_all_button = msg_box.addButton("Cancel All", QMessageBox.ButtonRole.RejectRole)
-                        msg_box.setDefaultButton(yes_button); msg_box.exec()
-                        
-                        clicked_btn = msg_box.clickedButton()
-                        if clicked_btn == no_button: 
-                            skipped_details.append(f"'{col_name}': Skipped by user due to new nulls."); continue
-                        elif clicked_btn == cancel_all_button: 
-                            user_cancelled_all = True; skipped_details.append(f"'{col_name}': Batch cancelled by user."); break
-                        elif clicked_btn == yes_all_button: 
-                            yes_to_all_warnings = True
+                    clicked_btn = msg_box.clickedButton()
+                    if clicked_btn == no_button: 
+                        skipped_details.append(f"'{col_name}': Skipped by user due to new nulls."); continue
+                    elif clicked_btn == cancel_all_button: 
+                        user_cancelled_all = True; skipped_details.append(f"'{col_name}': Batch cancelled by user."); break
+                    elif clicked_btn == yes_all_button: 
+                        yes_to_all_warnings = True
 
 
-                    self.df = self.df.with_columns(final_conversion_expr.alias(col_name))
-                    if self.filtered_df is not None and col_name in self.filtered_df.columns:
-                        self.filtered_df = self.filtered_df.with_columns(final_conversion_expr.alias(col_name))
-                    converted_count += 1
-                        
-                except Exception as e: 
-                    error_details.append(f"'{col_name}': {str(e)}")
-                    print(f"Error converting {col_name} to {type_name}: {e}") 
-                    import traceback
-                    traceback.print_exc()
+                self.df = self.df.with_columns(final_conversion_expr.alias(col_name))
+                if self.filtered_df is not None and col_name in self.filtered_df.columns:
+                    self.filtered_df = self.filtered_df.with_columns(final_conversion_expr.alias(col_name))
+                converted_count += 1
+            except Exception as e: 
+                error_details.append(f"'{col_name}': {str(e)}")
+                print(f"Error converting {col_name} to {type_name}: {e}") 
+                import traceback
+                traceback.print_exc()
 
 
         self.update_progress(95, "Updating view after batch conversion...")
@@ -2358,20 +2339,15 @@ class Pickaxe(QMainWindow):
         self.update_progress(100, f"Batch {type_name} conversion finished.")
         self.types_suggested_and_applied_this_session = True
 
-        if self.df is not None:
-            df_shape_after_batch_op = self.df.shape if not self.df.is_empty() else None
-        else:
-            df_shape_after_batch_op = 0
-            
         logger.log_action("Pickaxe", "Batch Type Conversion", 
-                        f"Attempted to convert {num_selected} columns to {type_name}.",
-                        details={"Columns Selected": selected_names, 
-                                "Target Type Name": type_name,
-                                "Target Polars Type": str(target_polars_type if target_polars_type else "Inferred from type_name"),
-                                "Converted Count": converted_count,
-                                "Skipped": skipped_details, "Errors": error_details},
-                        df_shape_before=df_shape_before_batch_op,
-                        df_shape_after=df_shape_after_batch_op)
+                          f"Attempted to convert {num_selected} columns to {type_name}.",
+                          details={"Columns Selected": selected_names, 
+                                   "Target Type Name": type_name,
+                                   "Target Polars Type": str(target_polars_type if target_polars_type else "Inferred from type_name"),
+                                   "Converted Count": converted_count,
+                                   "Skipped": skipped_details, "Errors": error_details},
+                          df_shape_before=df_shape_before_batch_op,
+                          df_shape_after=self.df.shape if not self.df.is_empty() else None)
 
     def convert_selected_columns_to_numeric_batch(self):
         self._batch_convert_columns("numeric")
@@ -2467,7 +2443,7 @@ class Pickaxe(QMainWindow):
         else:
             file_name = file_path
                     
-        if isinstance(file_name, str):
+        if file_name:
             self.initial_path_selected = os.path.dirname(file_name)
             self._filepath = file_name
             
@@ -2505,19 +2481,17 @@ class Pickaxe(QMainWindow):
             self.update_progress(0, f"Loading '{os.path.basename(file_name)}'...")
             QApplication.processEvents()
 
-            self.file_loader_thread = AsyncFileLoaderThread(file_name, sheet_name, parent_gui=self)
-
+            self.file_loader_thread = AsyncFileLoaderThread(file_name, sheet_name, parent_gui=self) # Modified Async to pass parent_gui
+            
             # Connect new signals from the worker instance (which is inside AsyncFileLoaderThread)
             # This assumes AsyncFileLoaderThread exposes its worker or the signals directly.
             # Let's assume AsyncFileLoaderThread's worker is self.worker_instance
             if hasattr(self.file_loader_thread, 'worker_instance'): # If worker is accessible
                 self.file_loader_thread.worker_instance.request_npz_array_selection.connect(self.prompt_npz_array_selection)
                 self.file_loader_thread.worker_instance.request_pickle_item_selection.connect(self.prompt_pickle_item_selection)
-                self.file_loader_thread.worker_instance.request_excel_to_csv_conversion.connect(self.prompt_excel_to_csv_conversion)
             else: # If AsyncFileLoaderThread itself relays the signals
                 self.file_loader_thread.request_npz_array_selection.connect(self.prompt_npz_array_selection)
                 self.file_loader_thread.request_pickle_item_selection.connect(self.prompt_pickle_item_selection)
-                self.file_loader_thread.request_excel_to_csv_conversion.connect(self.prompt_excel_to_csv_conversion) 
 
             self.file_loader_thread.finished_signal.connect(self.on_file_loaded)
             self.file_loader_thread.error_signal.connect(self.on_error)
@@ -2526,31 +2500,18 @@ class Pickaxe(QMainWindow):
         else:
             self.update_progress(0, ""); self.progress_bar.setVisible(False); self.progress_label.setVisible(False)
 
-    @Slot(str)
-    def prompt_excel_to_csv_conversion(self, filename):
-        reply = QMessageBox.question(self, "Excel Load Failed",
-                                       f"Could not open '{os.path.basename(filename)}' directly.\n\n"
-                                       "This can happen with very large or complex files.\n\n"
-                                       "Do you want to try converting it to a temporary CSV file and loading that instead?",
-                                       QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
-        
-        choice = (reply == QMessageBox.StandardButton.Yes)
-        
-        if hasattr(self.file_loader_thread, 'on_excel_conversion_choice_relayed'):
-            self.file_loader_thread.on_excel_conversion_choice_relayed(choice)
-
     @Slot(object, dict)
     def on_file_loaded(self, df, file_info):
-                
+        
         self.types_suggested_and_applied_this_session = False
         
         if not self.current_log_file_path: # Should have been set in load_file
              # Fallback if somehow not set (e.g. direct call to on_file_loaded without load_file)
             fallback_log_name = f".__log__{os.path.splitext(os.path.basename(self._filepath))[0] if self._filepath else 'unknown_data'}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
             self.current_log_file_path = os.path.join(os.getcwd(), fallback_log_name)
-            logger.set_log_file(self.current_log_file_path, "Pickaxe", associated_data_file=str(self._filepath) or "Unknown")
+            logger.set_log_file(self.current_log_file_path, "Pickaxe", associated_data_file=self._filepath or "Unknown")
 
-        if (df is None or df.is_empty()):
+        if df is None or df.is_empty():
             
             logger.log_action(
                 "Pickaxe", "File Load Error", 
@@ -2558,8 +2519,7 @@ class Pickaxe(QMainWindow):
                 details=file_info 
             )
             self.df_shape_before = (0, 0)
-            if isinstance(self._filepath, str):
-                self.on_error(f"File '{os.path.basename(self._filepath)}' loaded empty or failed.")
+            self.on_error(f"File '{os.path.basename(self._filepath)}' loaded empty or failed.")
             self.df = None; self.filtered_df = None
             self.update_model_slot(None, True); self.update_file_info_label()
             self.save_button.setEnabled(False); self.apply_query_button.setEnabled(False)
@@ -2572,27 +2532,23 @@ class Pickaxe(QMainWindow):
         if "__original_index__" not in df.columns:
             self.df = df.with_row_count("__original_index__") # Add original index
         
-        if self.df is not None:
-            self.filtered_df = self.df.clone()
+        self.filtered_df = self.df.clone()
 
-        if self._filepath:
-            if self._filepath.lower().endswith(('.xlsx', '.xlsm', '.xlsb', '.xls')):
-                file_info['total_sheets'] = len(self.sheet_names) if hasattr(self, 'sheet_names') else (1 if file_info.get('sheet_name') else 'N/A')
-            self.file_info = file_info
-            if self.df is not None:
-                self.original_row_count = self.df.height 
-            
-            logger.log_dataframe_load(
-                "Pickaxe",
-                self.file_info.get('filename', self._filepath), 
-                sheet_name=self.file_info.get('sheet_name'),
-                rows=self.file_info.get('rows', df.height), 
-                cols=self.file_info.get('columns', df.width), 
-                load_time_sec=self.file_info.get('load_time', 0)
-            )
-            
-        if self.df is not None:
-            self.df_shape_before = (self.df.height, self.df.width)
+        if self._filepath.lower().endswith(('.xlsx', '.xlsm', '.xlsb', '.xls')):
+            file_info['total_sheets'] = len(self.sheet_names) if hasattr(self, 'sheet_names') else (1 if file_info.get('sheet_name') else 'N/A')
+        self.file_info = file_info
+        self.original_row_count = self.df.height 
+        
+        logger.log_dataframe_load(
+            "Pickaxe",
+            self.file_info.get('filename', self._filepath), 
+            sheet_name=self.file_info.get('sheet_name'),
+            rows=self.file_info.get('rows', df.height), 
+            cols=self.file_info.get('columns', df.width), 
+            load_time_sec=self.file_info.get('load_time', 0)
+        )
+        
+        self.df_shape_before = (self.df.height, self.df.width)
                             
         self.applied_filters_info = []
         self.update_model_slot(self.filtered_df, True)
@@ -2601,24 +2557,20 @@ class Pickaxe(QMainWindow):
             self.filter_panel.panel_filters_changed.disconnect(self.update_query_input_from_structured_filters)
             self.filter_panel.deleteLater(); self.filter_panel = None
 
-        if self.df is not None:
-            columns_for_panel = [c for c in self.df.columns if c != "__original_index__"]
-            self.filter_panel = FilterPanel(columns_for_panel)
-            self.filter_panel.panel_filters_changed.connect(self.update_query_input_from_structured_filters)
+        columns_for_panel = [c for c in self.df.columns if c != "__original_index__"]
+        self.filter_panel = FilterPanel(columns_for_panel)
+        self.filter_panel.panel_filters_changed.connect(self.update_query_input_from_structured_filters)
 
-            if columns_for_panel or not df.is_empty(): # Always enable filter panel if df is loaded
-                self.filter_panel.apply_button.clicked.connect(self.apply_structured_filters)
-                self.filter_panel.setEnabled(True); self.filter_toggle_button.setEnabled(True)
-            else: 
-                self.filter_panel.setEnabled(False)
-                self.filter_toggle_button.setEnabled(False)
-                
-            self._layout.insertWidget(4, self.filter_panel)
-            self.filter_panel.setVisible(False)
-        
-        if isinstance(self._filepath, str):
-            self.update_progress(100, f"File '{os.path.basename(self._filepath)}' loaded.")
+        if columns_for_panel or not df.is_empty(): # Always enable filter panel if df is loaded
+            self.filter_panel.apply_button.clicked.connect(self.apply_structured_filters)
+            self.filter_panel.setEnabled(True); self.filter_toggle_button.setEnabled(True)
+        else: 
+            self.filter_panel.setEnabled(False)
+            self.filter_toggle_button.setEnabled(False)
             
+        self.layout.insertWidget(4, self.filter_panel)
+        self.filter_panel.setVisible(False)
+        self.update_progress(100, f"File '{os.path.basename(self._filepath)}' loaded.")
         if hasattr(self, 'file_loader_thread') and self.file_loader_thread:
             self.file_loader_thread.quit(); self.file_loader_thread.wait()
 
@@ -2647,11 +2599,10 @@ class Pickaxe(QMainWindow):
             self.vw_button.setEnabled(False) # Disable VW button if no data
             self.dt_button.setEnabled(False)
             self.suggest_conversions_button.setEnabled(False) # Disable new button
-            
-        if self.df is not None:
-            displayable_width = len([c for c in self.df.columns if c != "__original_index__"])
-            self.prev_columns_button.setEnabled(displayable_width > self.columns_per_page)
-            self.next_columns_button.setEnabled(displayable_width > self.columns_per_page)
+
+        displayable_width = len([c for c in self.df.columns if c != "__original_index__"])
+        self.prev_columns_button.setEnabled(displayable_width > self.columns_per_page)
+        self.next_columns_button.setEnabled(displayable_width > self.columns_per_page)
 
         self.update_completer_model()
 
@@ -2762,12 +2713,12 @@ class Pickaxe(QMainWindow):
         header_layout = QHBoxLayout()
         header_layout.addWidget(QLabel("<b>Column Name</b>"), 2)
         # New Order: String/Key, Category, Boolean, Integer, Numeric (Float), Datetime
-        header_layout.addWidget(QLabel("<b>String/Key</b>"), 1, alignment=Qt.AlignmentFlag.AlignCenter)
-        header_layout.addWidget(QLabel("<b>Category</b>"), 1, alignment=Qt.AlignmentFlag.AlignCenter)
-        header_layout.addWidget(QLabel("<b>Boolean</b>"), 1, alignment=Qt.AlignmentFlag.AlignCenter) # New
-        header_layout.addWidget(QLabel("<b>Integer</b>"), 1, alignment=Qt.AlignmentFlag.AlignCenter)
-        header_layout.addWidget(QLabel("<b>Numeric (Float)</b>"), 1, alignment=Qt.AlignmentFlag.AlignCenter)
-        header_layout.addWidget(QLabel("<b>Datetime</b>"), 1, alignment=Qt.AlignmentFlag.AlignCenter)
+        header_layout.addWidget(QLabel("<b>String/Key</b>"), 1, alignment=Qt.AlignCenter)
+        header_layout.addWidget(QLabel("<b>Category</b>"), 1, alignment=Qt.AlignCenter)
+        header_layout.addWidget(QLabel("<b>Boolean</b>"), 1, alignment=Qt.AlignCenter) # New
+        header_layout.addWidget(QLabel("<b>Integer</b>"), 1, alignment=Qt.AlignCenter)
+        header_layout.addWidget(QLabel("<b>Numeric (Float)</b>"), 1, alignment=Qt.AlignCenter)
+        header_layout.addWidget(QLabel("<b>Datetime</b>"), 1, alignment=Qt.AlignCenter)
         dialog_layout.addLayout(header_layout)
 
         scroll_area = QScrollArea()
@@ -2798,12 +2749,12 @@ class Pickaxe(QMainWindow):
             else: string_rb.setChecked(True) 
 
             grid_layout.addWidget(col_name_label, row_idx, 0)
-            grid_layout.addWidget(string_rb, row_idx, 1, alignment=Qt.AlignmentFlag.AlignCenter)
-            grid_layout.addWidget(category_rb, row_idx, 2, alignment=Qt.AlignmentFlag.AlignCenter)
-            grid_layout.addWidget(boolean_rb, row_idx, 3, alignment=Qt.AlignmentFlag.AlignCenter) # New
-            grid_layout.addWidget(integer_rb, row_idx, 4, alignment=Qt.AlignmentFlag.AlignCenter)
-            grid_layout.addWidget(float_rb, row_idx, 5, alignment=Qt.AlignmentFlag.AlignCenter)
-            grid_layout.addWidget(datetime_rb, row_idx, 6, alignment=Qt.AlignmentFlag.AlignCenter)
+            grid_layout.addWidget(string_rb, row_idx, 1, alignment=Qt.AlignCenter)
+            grid_layout.addWidget(category_rb, row_idx, 2, alignment=Qt.AlignCenter)
+            grid_layout.addWidget(boolean_rb, row_idx, 3, alignment=Qt.AlignCenter) # New
+            grid_layout.addWidget(integer_rb, row_idx, 4, alignment=Qt.AlignCenter)
+            grid_layout.addWidget(float_rb, row_idx, 5, alignment=Qt.AlignCenter)
+            grid_layout.addWidget(datetime_rb, row_idx, 6, alignment=Qt.AlignCenter)
 
 
             self.conversion_radio_button_groups.append(
@@ -2821,7 +2772,7 @@ class Pickaxe(QMainWindow):
         help_button.setToolTip("Help on Data Types")
         help_button.clicked.connect(self._show_type_conversion_help) 
         
-        dialog_buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        dialog_buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         dialog_buttons.accepted.connect(dialog.accept)
         dialog_buttons.rejected.connect(dialog.reject)
 
@@ -2843,22 +2794,21 @@ class Pickaxe(QMainWindow):
 
         for col_label, str_rb, cat_rb, bool_rb, int_rb, flt_rb, dt_rb in self.conversion_radio_button_groups:
             col_name_to_convert = col_label.text()
-            
-            if self.df is not None:
-                current_col_dtype = self.df.schema[col_name_to_convert]
-                if flt_rb.isChecked() and not isinstance(current_col_dtype, (pl.Float32, pl.Float64)):
-                    cols_to_float.append(col_name_to_convert)
-                elif int_rb.isChecked() and not current_col_dtype.is_integer():
-                    cols_to_int.append(col_name_to_convert)
-                elif dt_rb.isChecked() and not current_col_dtype.is_temporal():
-                    cols_to_datetime.append(col_name_to_convert)
-                elif cat_rb.isChecked() and current_col_dtype != pl.Categorical:
-                    cols_to_category.append(col_name_to_convert)
-                elif bool_rb.isChecked() and current_col_dtype != pl.Boolean: # New
-                    cols_to_boolean.append(col_name_to_convert)
-                elif str_rb.isChecked() and current_col_dtype != pl.Utf8: 
-                    cols_to_string.append(col_name_to_convert)
-            
+            current_col_dtype = self.df.schema[col_name_to_convert]
+
+            if flt_rb.isChecked() and not isinstance(current_col_dtype, (pl.Float32, pl.Float64)):
+                cols_to_float.append(col_name_to_convert)
+            elif int_rb.isChecked() and not current_col_dtype.is_integer():
+                cols_to_int.append(col_name_to_convert)
+            elif dt_rb.isChecked() and not current_col_dtype.is_temporal():
+                cols_to_datetime.append(col_name_to_convert)
+            elif cat_rb.isChecked() and current_col_dtype != pl.Categorical:
+                cols_to_category.append(col_name_to_convert)
+            elif bool_rb.isChecked() and current_col_dtype != pl.Boolean: # New
+                cols_to_boolean.append(col_name_to_convert)
+            elif str_rb.isChecked() and current_col_dtype != pl.Utf8: 
+                cols_to_string.append(col_name_to_convert)
+        
         any_conversion_done = False
         if cols_to_float:
             self.context_menu_selected_column_names = cols_to_float
@@ -2902,7 +2852,7 @@ class Pickaxe(QMainWindow):
             # If user cancels suggest_types, we might still proceed or not
             if not self.types_suggested_and_applied_this_session: # Check if they actually applied changes
                 if QMessageBox.question(self, "Proceed?", "Proceed to Visual Workshop without applying type suggestions?",
-                                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No) == QMessageBox.StandardButton.No:
+                                        QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.No:
                     self.statusBar().showMessage("Visual Workshop launch cancelled.", 2000)
                 else:
                     if self.visual_workshop_window is not None and self.visual_workshop_window.isVisible():
@@ -3023,7 +2973,7 @@ class Pickaxe(QMainWindow):
             # except RuntimeError: pass
             self.table_view.selectionModel().currentColumnChanged.connect(self.handle_column_selection_for_stats)
 
-        self.table_view.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.table_view.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.table_view.verticalHeader().setDefaultSectionSize(8)
         self.update_column_range_label(df_to_display) # Pass the full df_to_display for accurate total counts
 
@@ -3076,7 +3026,7 @@ class Pickaxe(QMainWindow):
 
     def load_dataframe_from_source(self, df_from_source, name_hint, source_log_file_path=None):
         self.statusBar().showMessage(f"Receiving data: {name_hint}", 3000)
-        self._filepath = os.path.abspath(name_hint)
+        self._filepath = name_hint 
         self.df = df_from_source.clone()
         if "__original_index__" not in self.df.columns:
             self.df = self.df.with_row_count("__original_index__")
@@ -3161,13 +3111,12 @@ class Pickaxe(QMainWindow):
     @Slot(str)
     def on_save_completed(self, file_name_cb):
         
-        if self.df is not None:
-            logger.log_dataframe_save(
-                "Pickaxe", file_name_cb,
-                rows=getattr(self, 'df_to_save_op_ref', self.df).height, 
-                cols=getattr(self, 'df_to_save_op_ref', self.df).width,
-                source_data_name=os.path.basename(self._filepath) if self._filepath else "current data"
-            )
+        logger.log_dataframe_save(
+            "Pickaxe", file_name_cb, # This is the actual saved file
+            rows=getattr(self, 'df_to_save_op_ref', self.df).height, 
+            cols=getattr(self, 'df_to_save_op_ref', self.df).width,
+            source_data_name=os.path.basename(self._filepath) if self._filepath else "current data"
+        )
         
         self.update_progress(100, f"File saved successfully as {file_name_cb}")
         QMessageBox.information(self, "Save Successful", f"File saved successfully as {file_name_cb}")
@@ -3256,7 +3205,7 @@ class Pickaxe(QMainWindow):
         # Create a small dialog or message box offering multiple links
         msg_box = QMessageBox(self)
         msg_box.setWindowTitle("Polars Query Help")
-        msg_box.setTextFormat(Qt.TextFormat.RichText) # Allow HTML for links
+        msg_box.setTextFormat(Qt.RichText) # Allow HTML for links
         msg_box.setText(
             "<b>Polars Expressions:</b><br>"
             "<a href='https://docs.pola.rs/user-guide/expressions/'>Official Polars Expression Guide</a><br><br>"
@@ -3264,7 +3213,7 @@ class Pickaxe(QMainWindow):
             "Used in Polars string functions like <code>.str.contains(r'pattern')</code>, <code>.str.extract()</code>, etc.<br>"
             "Learn Regex at: <a href='https://www.regexone.com/'>regexone.com</a>"
         )
-        msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        msg_box.setStandardButtons(QMessageBox.Ok)
         msg_box.exec()
 
     def update_column_range_label(self, df_with_potential_index):
@@ -3387,7 +3336,7 @@ class Pickaxe(QMainWindow):
             self.filter_panel = FilterPanel(new_panel_cols)
             self.filter_panel.panel_filters_changed.connect(self.update_query_input_from_structured_filters)
             self.filter_panel.apply_button.clicked.connect(self.apply_structured_filters)
-            self._layout.insertWidget(4, self.filter_panel)
+            self.layout.insertWidget(4, self.filter_panel)
             self.filter_panel.setVisible(False); self.filter_panel.setEnabled(True); self.filter_toggle_button.setEnabled(True)
             self.update_query_input_from_structured_filters()
 
@@ -3401,7 +3350,7 @@ class Pickaxe(QMainWindow):
         except Exception as e:
             self.update_progress(100, f"Error setting header: {e}")
             QMessageBox.critical(self, "Set Header Error", str(e))
-            logger.log_action( "Pickaxe", "Header Changing Error", "Error Setting Header", details={"Error": str(e)})
+            logger.log_action( "Pickaxe", "Header Changing Error", details={"Error": str(e)})
 
     def update_file_info_label(self):
         if not self._filepath or not self.file_info: self.file_info_label.setText("No file loaded."); return
@@ -3431,15 +3380,9 @@ class Pickaxe(QMainWindow):
         self.file_info_label.setText(file_info_text.strip())
 
     def keyPressEvent(self, event):
-        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
             focused_widget = QApplication.focusWidget()
-            
-            if focused_widget and self.filter_panel:
-                foc_widg_flg = self.filter_panel.isAncestorOf(focused_widget)
-            else:
-                foc_widg_flg = False
-                
-            if self.filter_panel and self.filter_panel.isVisible() and foc_widg_flg:
+            if self.filter_panel and self.filter_panel.isVisible() and self.filter_panel.isAncestorOf(focused_widget):
                 if isinstance(focused_widget, (QLineEdit, QComboBox, QCheckBox, QRadioButton, QDateEdit)):
                     self.apply_structured_filters(); event.accept(); return
             elif focused_widget == self.query_input:
@@ -3470,11 +3413,11 @@ class Pickaxe(QMainWindow):
                                        "Would you like to run type suggestions before opening Visual Workshop?\n"
                                        "Should you like to run type suggestions, click 'Yes' and open Visual Workshop afterwards.\n"
                                        "(This can improve plotting accuracy for some columns).",
-                                       QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
-                                       QMessageBox.StandardButton.No)
-            if reply == QMessageBox.StandardButton.Yes:
+                                       QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+                                       QMessageBox.No)
+            if reply == QMessageBox.Yes:
                 self.suggest_and_convert_types()
-            elif reply == QMessageBox.StandardButton.Cancel:
+            elif reply == QMessageBox.Cancel:
                 self.statusBar().showMessage("Visual Workshop launch cancelled.", 2000)
                 return
         else:
@@ -3493,11 +3436,10 @@ class Pickaxe(QMainWindow):
                             details={"Data Hint": file_hint, "Data Shape": current_df.shape if current_df is not None else "N/A"})
 
         # Always send the current data and log path when showing
-        if self.visual_workshop_window:
-            self.visual_workshop_window.receive_dataframe(current_df, file_hint, log_file_path_from_source=self.current_log_file_path)
-            self.visual_workshop_window.show()
-            self.visual_workshop_window.raise_()
-            self.visual_workshop_window.activateWindow()
+        self.visual_workshop_window.receive_dataframe(current_df, file_hint, log_file_path_from_source=self.current_log_file_path)
+        self.visual_workshop_window.show()
+        self.visual_workshop_window.raise_()
+        self.visual_workshop_window.activateWindow()
 
     def closeEvent(self, event):
         # First, handle potential child windows like VW and DT
@@ -3521,10 +3463,10 @@ class Pickaxe(QMainWindow):
         if self.df is not None and not self.df.is_empty(): # Check if there's data
             reply = QMessageBox.question(self, 'Confirm Exit',
                                            "Do you want to save your current data before closing Pickaxe?",
-                                           QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
-                                           QMessageBox.StandardButton.Cancel) # Default to Cancel
+                                           QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+                                           QMessageBox.Cancel) # Default to Cancel
 
-            if reply == QMessageBox.StandardButton.Yes:
+            if reply == QMessageBox.Yes:
                 # Attempt to save. self.save_file() opens a dialog.
                 # We need to know if the save was successful or if the user cancelled the save dialog.
                 # Modify save_file to return a status or check if _filepath was updated.
@@ -3544,17 +3486,17 @@ class Pickaxe(QMainWindow):
                 # Let's make save_file return a boolean
                 save_success = self.save_file_for_close_event() # A new method to handle this
                 if save_success is None: # User cancelled the "do you want to save" dialog itself
-                    event.ignore() # This case is handled by QMessageBox.StandardButton.Cancel
+                    event.ignore() # This case is handled by QMessageBox.Cancel
                 elif save_success: # Save was successful OR user chose not to save in the save_file dialog
                     logger.log_action("Pickaxe", "Application Close", "User chose to save (or cancelled save dialog) and then closed.")
                     event.accept()
                 else: # Save was attempted but failed, or save_file itself indicated a reason not to close (e.g. explicit cancel)
                     event.ignore() # Don't close if save failed or was explicitly cancelled from save_file dialog
 
-            elif reply == QMessageBox.StandardButton.No:
+            elif reply == QMessageBox.No:
                 logger.log_action("Pickaxe", "Application Close", "User chose not to save and closed.")
                 event.accept() # Close without saving
-            else: # QMessageBox.StandardButton.Cancel or user closed the dialog
+            else: # QMessageBox.Cancel or user closed the dialog
                 logger.log_action("Pickaxe", "Application Close", "User cancelled closing.")
                 event.ignore() # Don't close
         else:

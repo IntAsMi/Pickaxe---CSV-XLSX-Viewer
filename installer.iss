@@ -13,12 +13,12 @@
 AppId={{8ECA1FA6-E771-4F9A-B83B-F0DBE95CC5C6}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
-AppVerName={#MyAppName}_{#MyAppVersion}
+;AppVerName={#MyAppName} {#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}
-DefaultDirName={autopf}\{#MyAppName}
+DefaultDirName={autopf}\My Program
 UninstallDisplayIcon={app}\{#MyAppExeName}
 ; "ArchitecturesAllowed=x64compatible" specifies that Setup cannot run
 ; on anything but x64 and Windows 11 on Arm.
@@ -42,12 +42,12 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-Source: "C:\Users\Matthew\GitHub\Pickaxe---CSV-XLSX-Viewer\build\exe.win-amd64-3.13\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "C:\Users\Matthew\GitHub\Pickaxe---CSV-XLSX-Viewer\build\exe.win-amd64-3.13\magic-wand.ico"; DestDir: "{app}"; Flags: ignoreversion
-Source: "C:\Users\Matthew\GitHub\Pickaxe---CSV-XLSX-Viewer\build\exe.win-amd64-3.13\pickaxe.ico"; DestDir: "{app}"; Flags: ignoreversion
-Source: "C:\Users\Matthew\GitHub\Pickaxe---CSV-XLSX-Viewer\build\exe.win-amd64-3.13\settings.ico"; DestDir: "{app}"; Flags: ignoreversion
-Source: "C:\Users\Matthew\GitHub\Pickaxe---CSV-XLSX-Viewer\build\exe.win-amd64-3.13\vw.ico"; DestDir: "{app}"; Flags: ignoreversion
-Source: "C:\Users\Matthew\GitHub\Pickaxe---CSV-XLSX-Viewer\build\exe.win-amd64-3.13\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "C:\Users\Matthew\GitHub\Pickaxe\build\Pickaxe\build\exe.win-amd64-3.12\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "C:\Users\Matthew\GitHub\Pickaxe\build\Pickaxe\build\exe.win-amd64-3.12\magic-wand.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "C:\Users\Matthew\GitHub\Pickaxe\build\Pickaxe\build\exe.win-amd64-3.12\pickaxe.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "C:\Users\Matthew\GitHub\Pickaxe\build\Pickaxe\build\exe.win-amd64-3.12\settings.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "C:\Users\Matthew\GitHub\Pickaxe\build\Pickaxe\build\exe.win-amd64-3.12\vw.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "C:\Users\Matthew\GitHub\Pickaxe\build\Pickaxe\build\exe.win-amd64-3.12\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; NOTE: Don't use "Flags: ignoreversion" on any shared system files
 
 [Icons]

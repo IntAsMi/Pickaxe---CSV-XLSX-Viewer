@@ -1,10 +1,9 @@
 # Pickaxe
 
-Pickaxe is a powerful and user-friendly data viewer and manipulation tool, now replacing Pandas library with the Polars library. It allows users to open, view, filter, analyze, and save large CSV and Excel files quickly, efficiently, all in a single executable file with no installation required.
+Pickaxe is a powerful and user-friendly data viewer and manipulation tool, now replacing Pandas library with the Polars library. It allows users to open, view, filter, analyze, and save large CSV and Excel files quickly, efficiently, all in a single installer executable file for this application only is required.
 
 ## Features
 
--   **No Installation Required**: Pickaxe comes as a single `.exe` file, ready to use out of the box.
 -   **Polars-Powered Backend**: Utilizes the high-performance Polars DataFrame library for exceptional speed and memory efficiency.
 -   **Multi-format Support**: Open and read CSV, XLSX, XLS, XLSM, and XLSB files.
 -   **Large File Handling**:
@@ -40,7 +39,7 @@ Pickaxe is a powerful and user-friendly data viewer and manipulation tool, now r
 1.  Download the `Pickaxe.exe` file from the Releases page of its repository.
 2.  Double-click the downloaded file to run Pickaxe.
 
-No installation or additional software is required!
+Only installation of this application is required!
 
 ## Usage
 

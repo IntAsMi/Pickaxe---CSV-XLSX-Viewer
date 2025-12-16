@@ -4,7 +4,6 @@ import tempfile
 from main import Pickaxe, resource_path # Assuming Pickaxe is in main.py
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QIcon
-import time
 
 if "NUITKA_ONEFILE_PARENT" in os.environ:
    splash_filename = os.path.join(

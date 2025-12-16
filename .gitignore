@@ -21,8 +21,5 @@ __pycache__/visual_workshop.cpython-312.pyc
 *.xml
 *.csv
 .__*
+.vscode/settings.json
 build/*
-p!ckaxe_build.zip
-Output/p!ckaxe_installer.exe
-*.json
-*.png
