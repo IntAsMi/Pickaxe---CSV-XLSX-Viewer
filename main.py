@@ -1413,7 +1413,7 @@ class Pickaxe(QMainWindow):
 
         self.query_filter_layout = QHBoxLayout()
         self.query_input = QLineEdit()
-        self.query_input.setPlaceholderText("Enter Polars filter expression (e.g., pl.col('Age') > 30 or pl.col('Name').str.contains(r'J[ao]ne? Doe'))") # Example with regex
+        self.query_input.setPlaceholderText("Enter Polars filter expression (e.g., pl.col('Dear') == 'Poni' or pl.col('Name').str.contains(r'(^Gloria\sTonna$)|(El\sCupa\sHangue) '))") # Example with regex
 
         self.df = None
 
@@ -2929,7 +2929,7 @@ class Pickaxe(QMainWindow):
                 <ul>
                     <li><b>What it is:</b> Text data. Can be words, sentences, codes, or numbers not used for math (like IDs, phone numbers).</li>
                     <li><b>When to use:</b> For unique identifiers, free-form text, or when other types don't fit. If a column has mixed letters and numbers, or numbers you'll never do math on, String/Key is often best.</li>
-                    <li><b>Example:</b> "ABC-123", "John Doe", "This is a note", "90210" (as ZIP), "POL_10023".</li>
+                    <li><b>Example:</b> "DCuRH-0106", "Nenannana", "Malta", "03:35" (as in Duration), "Gunglienu Road".</li>
                 </ul>
             </p>
 
@@ -2937,7 +2937,7 @@ class Pickaxe(QMainWindow):
                 <ul>
                     <li><b>What it is:</b> Text or numbers representing a fixed, limited set of groups or labels. Useful for columns with few unique values that repeat often.</li>
                     <li><b>When to use:</b> When values define distinct groups (e.g., "Gender", "Country Code", "Product Type", "Status"). This can save memory and speed up operations like grouping or filtering. Great for coloring or faceting in plots.</li>
-                    <li><b>Example:</b> "Male"/"Female", "USA"/"CAN"/"MEX", "Active"/"Inactive", "Yes"/"No", "Type A"/"Type B".</li>
+                    <li><b>Example:</b> "Male"/"Female", "MLT"/"GZO"/"KMN", "Active"/"Inactive", "Yes"/"No", "Tond"/"Kwardu".</li>
                 </ul>
             </p>
 
@@ -2953,7 +2953,7 @@ class Pickaxe(QMainWindow):
                 <ul>
                     <li><b>What it is:</b> Whole numbers without decimal points (e.g., -2, 0, 5, 100).</li>
                     <li><b>When to use:</b> For counts, quantities, or discrete numerical values you might perform math on. If a column only contains numbers like 1, 2, 150, -10 (and no 1.5, 2.3), Integer is suitable.</li>
-                    <li><b>Example:</b> 42, -100, 0, 78932, number of items.</li>
+                    <li><b>Example:</b> 16, 490358, 0, 3410347, number of items.</li>
                 </ul>
             </p>
 
@@ -2961,7 +2961,7 @@ class Pickaxe(QMainWindow):
                 <ul>
                     <li><b>What it is:</b> Numbers that can have decimal points. Used for continuous measurements, amounts, calculations.</li>
                     <li><b>When to use:</b> For any number you might do math with, especially if it can have fractions or requires high precision (e.g., prices, percentages, sensor readings, monetary values).</li>
-                    <li><b>Example:</b> 123.45, -0.5, 100.00, 3.14159.</li>
+                    <li><b>Example:</b> 3.43, -2.42, 100.00, 3.14159.</li>
                 </ul>
             </p>
 
@@ -2969,7 +2969,7 @@ class Pickaxe(QMainWindow):
                 <ul>
                     <li><b>What it is:</b> Represents specific dates, and optionally, times.</li>
                     <li><b>When to use:</b> For any column that holds date or date & time information. This allows for date-based calculations (e.g., time differences, extracting year/month) and proper plotting on time axes.</li>
-                    <li><b>Example:</b> "2023-10-26", "2023-10-26 14:30:00", "10/26/2023". The tool will try to understand common date formats.</li>
+                    <li><b>Example:</b> "2006-06-15", "2013-07-06 14:30:00", "31/03/1999". The tool will try to understand common date formats.</li>
                 </ul>
             </p>
             <p><i>Choosing the right type helps with data analysis, plotting, and memory usage. The suggestions are based on the data's appearance, but your knowledge of the data is key! Converting to a more specific type can enable more powerful operations.</i></p>
