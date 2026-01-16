@@ -32,6 +32,7 @@ from tabulate import tabulate
 import xlrd
 from operation_logger import logger 
 import threading
+from data_converter import datetime_parser, number_parser
 
 if "NUITKA_ONEFILE_PARENT" in os.environ:
    splash_filename = os.path.join(
@@ -2131,7 +2132,7 @@ class Pickaxe(QMainWindow):
 
             significant_new_nans = False
             if converted_nulls_temp > original_nulls_df + (0.1 * self.df.height):
-                if type_name == "datetime" and temp_converted_series.dtype in [pl.Datetime, pl.Date]:
+                if type_name == "Datetime" and temp_converted_series.dtype in [pl.Datetime, pl.Date]:
                      pass
                 else:
                     significant_new_nans = True
@@ -2195,7 +2196,7 @@ class Pickaxe(QMainWindow):
         else:
             expr_builder = lambda c_expr: c_expr.cast(pl.Datetime, strict=False).dt.replace_time_zone(None)
 
-        self._convert_column_type(expr_builder, "datetime")
+        self._convert_column_type(expr_builder, "Datetime")
 
 
     def _batch_convert_columns(self, type_name, target_polars_type=None):
@@ -2218,7 +2219,7 @@ class Pickaxe(QMainWindow):
         for i, col_name in enumerate(selected_names):
             self.update_progress(int(((i + 0.5) / num_selected) * 100), f"Converting {i+1}/{num_selected}: '{col_name}' to {type_name}...")
             QApplication.processEvents()
-
+            
             try:
                 if col_name not in self.df.columns:
                     error_details.append(f"'{col_name}': Column not found in DataFrame.")
@@ -2231,22 +2232,22 @@ class Pickaxe(QMainWindow):
                 final_conversion_expr = None
                 actual_target_polars_type = None 
 
-                if type_name == "numeric_float": 
+                if type_name in ("numeric", "Number (Float64)"): 
                     actual_target_polars_type = pl.Float64
-                    final_conversion_expr = pl.col(col_name).cast(pl.Float64, strict=False)
-                elif type_name == "integer": 
+                    final_conversion_expr = number_parser(col_name)
+                elif type_name == "Number (Integer64)": 
                     actual_target_polars_type = pl.Int64
-                    final_conversion_expr = pl.col(col_name).cast(pl.Int64, strict=False)
-                elif type_name == "datetime": 
+                    final_conversion_expr = number_parser(col_name).cast(pl.Int64)
+                elif type_name == "Datetime": 
                     actual_target_polars_type = pl.Datetime
                     if current_col_schema_dtype == pl.Utf8:
-                        final_conversion_expr = pl.col(col_name).str.to_datetime(strict=False, time_unit='ns', ambiguous='earliest', format=None).dt.replace_time_zone(None)
+                        final_conversion_expr = datetime_parser(col_name).dt.replace_time_zone(None)
                     else: 
-                        final_conversion_expr = pl.col(col_name).cast(pl.Datetime, strict=False).dt.replace_time_zone(None)
-                elif type_name == "categorical": 
+                        final_conversion_expr = pl.col(col_name).cast(pl.Datetime, strict=True).dt.replace_time_zone(None)
+                elif type_name == "Categorical": 
                     actual_target_polars_type = pl.Categorical
                     final_conversion_expr = pl.col(col_name).cast(pl.Categorical, strict=False) # Use strict=False initially
-                elif type_name == "boolean": # New Boolean type
+                elif type_name == "Boolean": # New Boolean type
                     actual_target_polars_type = pl.Boolean
                     # Polars' cast to Boolean is quite good with "true"/"false", 0/1
                     # For more complex strings ("Yes", "No"), pre-processing might be needed
@@ -2264,13 +2265,9 @@ class Pickaxe(QMainWindow):
                     else: # If not string, direct cast
                         final_conversion_expr = pl.col(col_name).cast(pl.Boolean, strict=False)
 
-                elif type_name == "string_key": 
+                elif type_name == "String (ID Field/Key)": 
                     actual_target_polars_type = pl.Utf8
                     final_conversion_expr = pl.col(col_name).cast(pl.Utf8)
-                elif type_name == "numeric": # Context menu "Convert to Numeric" usually implies float
-                    actual_target_polars_type = pl.Float64
-                    final_conversion_expr = pl.col(col_name).cast(pl.Float64, strict=False)
-
 
                 if final_conversion_expr is None:
                     error_details.append(f"'{col_name}': No conversion logic for target type name '{type_name}'.")
@@ -2287,7 +2284,7 @@ class Pickaxe(QMainWindow):
                 elif newly_created_nulls > 0.05 * self.df.height:
                     significant_new_nans = True
                 
-                if type_name == "string_key" or type_name == "boolean": # Don't usually warn for these if result is mostly nulls as intended
+                if type_name == "String (ID Field/Key)" or type_name == "Boolean": # Don't usually warn for these if result is mostly nulls as intended
                     significant_new_nans = False
 
 
@@ -2353,7 +2350,7 @@ class Pickaxe(QMainWindow):
         self._batch_convert_columns("numeric")
 
     def convert_selected_columns_to_datetime_batch(self):
-        self._batch_convert_columns("datetime")
+        self._batch_convert_columns("Datetime")
 
     def show_context_menu(self, position):
         menu = QMenu()
@@ -2635,7 +2632,7 @@ class Pickaxe(QMainWindow):
             series = df_to_analyze.get_column(col_name)
             non_null_series = series.drop_nulls()
             
-            current_suggestion = "string_key" 
+            current_suggestion = "String (ID Field/Key)" 
 
             if non_null_series.is_empty():
                 suggested_conversions.append((col_name, current_suggestion)) 
@@ -2643,15 +2640,15 @@ class Pickaxe(QMainWindow):
 
             # 1. Check existing non-string types
             if series.dtype in [pl.Int8, pl.Int16, pl.Int32, pl.Int64, pl.UInt8, pl.UInt16, pl.UInt32, pl.UInt64]:
-                current_suggestion = "integer"
+                current_suggestion = "Number (Integer64)"
             elif series.dtype in [pl.Float32, pl.Float64]:
-                current_suggestion = "numeric_float"
+                current_suggestion = "Number (Float64)"
             elif series.dtype == pl.Categorical:
                 current_suggestion = "category"
             elif series.dtype in [pl.Date, pl.Datetime]:
-                current_suggestion = "datetime"
+                current_suggestion = "Datetime"
             elif series.dtype == pl.Boolean:
-                current_suggestion = "boolean" # Already boolean
+                current_suggestion = "Boolean" # Already Boolean
             
             # 2. If it's a string, try to infer better types
             elif series.dtype == pl.Utf8:
@@ -2662,35 +2659,35 @@ class Pickaxe(QMainWindow):
                     if casted_dt_sample.null_count() / sample_size_dt <= 0.1:
                          casted_dt_full = non_null_series.str.to_datetime(strict=False, time_unit='us', ambiguous='earliest', format=None)
                          if casted_dt_full.null_count() / non_null_series.len() <= 0.05: 
-                             current_suggestion = "datetime"
+                             current_suggestion = "Datetime"
                 except Exception: pass
 
                 # Attempt Boolean if not datetime
-                if current_suggestion == "string_key":
+                if current_suggestion == "String (ID Field/Key)":
                     unique_lower_strings = {s.lower() for s in non_null_series.unique().to_list() if s is not None}
                     if unique_lower_strings.issubset(BOOLEAN_TRUE_STRINGS.union(BOOLEAN_FALSE_STRINGS)):
-                        current_suggestion = "boolean"
+                        current_suggestion = "Boolean"
 
-                # Attempt Integer if not datetime or boolean
-                if current_suggestion == "string_key":
+                # Attempt Integer if not datetime or Boolean
+                if current_suggestion == "String (ID Field/Key)":
                     try:
                         _ = non_null_series.cast(pl.Int64, strict=True) 
-                        current_suggestion = "integer"
+                        current_suggestion = "Number (Integer64)"
                     except: 
                         try:
                             casted_float_for_int_check = non_null_series.cast(pl.Float64, strict=False)
                             if not casted_float_for_int_check.is_null().all() and \
                                (casted_float_for_int_check.drop_nulls().fill_null(0.1) % 1 == 0).all(): # check whole numbers
                                 if casted_float_for_int_check.null_count() / non_null_series.len() <= 0.05:
-                                    current_suggestion = "integer"
-                            # Attempt Float (lenient) if not integer-like float
-                            elif current_suggestion == "string_key": 
+                                    current_suggestion = "Number (Integer64)"
+                            # Attempt Float (lenient) if not Number (Integer64)-like float
+                            elif current_suggestion == "String (ID Field/Key)": 
                                 if casted_float_for_int_check.null_count() / non_null_series.len() <= 0.05:
-                                    current_suggestion = "numeric_float"
+                                    current_suggestion = "Number (Float64)"
                         except Exception: pass
 
-                # Attempt Categorical if not datetime, boolean, or numeric
-                if current_suggestion == "string_key": 
+                # Attempt Categorical if not datetime, Boolean, or numeric
+                if current_suggestion == "String (ID Field/Key)": 
                     n_unique = non_null_series.n_unique()
                     if n_unique <= MAX_UNIQUE_CATEGORICAL_ABS or \
                        (non_null_series.len() > 0 and (n_unique / non_null_series.len()) <= MAX_UNIQUE_CATEGORICAL_REL):
@@ -2740,12 +2737,12 @@ class Pickaxe(QMainWindow):
             button_group.addButton(string_rb); button_group.addButton(category_rb); button_group.addButton(boolean_rb)
             button_group.addButton(integer_rb); button_group.addButton(float_rb); button_group.addButton(datetime_rb)
 
-            if suggested_type == "string_key": string_rb.setChecked(True)
+            if suggested_type == "String (ID Field/Key)": string_rb.setChecked(True)
             elif suggested_type == "category": category_rb.setChecked(True)
-            elif suggested_type == "boolean": boolean_rb.setChecked(True) # New
-            elif suggested_type == "integer": integer_rb.setChecked(True)
-            elif suggested_type == "numeric_float": float_rb.setChecked(True)
-            elif suggested_type == "datetime": datetime_rb.setChecked(True)
+            elif suggested_type == "Boolean": boolean_rb.setChecked(True) # New
+            elif suggested_type == "Number (Integer64)": integer_rb.setChecked(True)
+            elif suggested_type == "Number (Float64)": float_rb.setChecked(True)
+            elif suggested_type == "Datetime": datetime_rb.setChecked(True)
             else: string_rb.setChecked(True) 
 
             grid_layout.addWidget(col_name_label, row_idx, 0)
@@ -2812,27 +2809,27 @@ class Pickaxe(QMainWindow):
         any_conversion_done = False
         if cols_to_float:
             self.context_menu_selected_column_names = cols_to_float
-            self._batch_convert_columns("numeric_float", target_polars_type=pl.Float64)
+            self._batch_convert_columns("Number (Float64)", target_polars_type=pl.Float64)
             any_conversion_done = True
         if cols_to_int:
             self.context_menu_selected_column_names = cols_to_int
-            self._batch_convert_columns("integer", target_polars_type=pl.Int64)
+            self._batch_convert_columns("Number (Integer64)", target_polars_type=pl.Int64)
             any_conversion_done = True
         if cols_to_datetime:
             self.context_menu_selected_column_names = cols_to_datetime
-            self._batch_convert_columns("datetime", target_polars_type=pl.Datetime)
+            self._batch_convert_columns("Datetime", target_polars_type=pl.Datetime)
             any_conversion_done = True
         if cols_to_category:
             self.context_menu_selected_column_names = cols_to_category
-            self._batch_convert_columns("categorical", target_polars_type=pl.Categorical)
+            self._batch_convert_columns("Categorical", target_polars_type=pl.Categorical)
             any_conversion_done = True
         if cols_to_boolean: # New
             self.context_menu_selected_column_names = cols_to_boolean
-            self._batch_convert_columns("boolean", target_polars_type=pl.Boolean)
+            self._batch_convert_columns("Boolean", target_polars_type=pl.Boolean)
             any_conversion_done = True
         if cols_to_string: 
             self.context_menu_selected_column_names = cols_to_string
-            self._batch_convert_columns("string_key", target_polars_type=pl.Utf8)
+            self._batch_convert_columns("String (ID Field/Key)", target_polars_type=pl.Utf8)
             any_conversion_done = True
         
         if any_conversion_done:
@@ -3162,7 +3159,7 @@ class Pickaxe(QMainWindow):
         # Use self.df (which includes __original_index__) for context,
         # but the user's query should ideally not reference __original_index__ directly.
         # The query will operate on the DataFrame, and __original_index__ will be preserved.
-        eval_context = {"pl": pl, "datetime": datetime, "date": date}
+        eval_context = {"pl": pl, "Datetime": datetime, "date": date}
         if self.df is not None:
             # Provide displayable columns in context for pl.col() usage
             display_cols = [c for c in self.df.columns if c != "__original_index__"]
@@ -3483,7 +3480,7 @@ class Pickaxe(QMainWindow):
                 # Simple approach: if save_file is called, and they *don't* cancel its dialog, it saves.
                 # This prompt is about *whether to initiate* the save process.
                 
-                # Let's make save_file return a boolean
+                # Let's make save_file return a Boolean
                 save_success = self.save_file_for_close_event() # A new method to handle this
                 if save_success is None: # User cancelled the "do you want to save" dialog itself
                     event.ignore() # This case is handled by QMessageBox.Cancel
